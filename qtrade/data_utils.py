@@ -322,6 +322,89 @@ def get_option_open_price(df, symbol, target_time, print_info=True):
         return None
 
 
+def get_option_full_info(df, symbol, target_time, print_info=False):
+    """
+    获取指定期权符号在指定时间点的完整信息（价格、IV、Delta等）
+    
+    Args:
+        df: pandas DataFrame，包含期权数据
+        symbol: 期权符号，如 'BTC-USD-210115-35000-C'
+        target_time: 目标时间点，可以是字符串或datetime对象
+        print_info: 是否打印详细信息
+        
+    Returns:
+        dict or None: 完整期权信息，如果没找到则返回None
+    """
+    import pandas as pd
+    
+    try:
+        # 转换目标时间为datetime对象
+        if isinstance(target_time, str):
+            if 'UTC' in target_time:
+                target_dt = pd.to_datetime(target_time)
+            else:
+                target_dt = pd.to_datetime(target_time + ' UTC')
+        else:
+            target_dt = pd.to_datetime(target_time)
+        
+        # 转换DataFrame的时间列（如果还没转换）
+        if 'datetime' not in df.columns:
+            df['datetime'] = pd.to_datetime(df['time'])
+        
+        # 筛选匹配的记录
+        filtered_df = df[
+            (df['symbol'] == symbol) & 
+            (df['datetime'] == target_dt)
+        ]
+        
+        if len(filtered_df) == 0:
+            if print_info:
+                print(f"⚠️  没有找到匹配的记录: symbol={symbol}, time={target_dt}")
+            return None
+        
+        if len(filtered_df) > 1:
+            if print_info:
+                print(f"⚠️  找到多条匹配记录({len(filtered_df)}条)，使用第一条")
+        
+        # 获取完整信息
+        row = filtered_df.iloc[0]
+        
+        option_info = {
+            'symbol': symbol,
+            'time': target_dt,
+            'open': row['open'],
+            'iv': row.get('iv', 0),
+            'iv_percent': row.get('iv_percent', 0),
+            'delta': row.get('pa_delta', row.get('bs_delta', 0)),  # 优先使用PA Delta
+            'gamma': row.get('pa_gamma', row.get('bs_gamma', 0)),  # 优先使用PA Gamma
+            'vega': row.get('pa_vega', row.get('bs_vega', 0)),     # 优先使用PA Vega
+            'strike_price': row.get('strike_price', 0),
+            'spot_open': row.get('spot_open', 0),
+            'days_to_expiry': row.get('days_to_expiry', 0),
+            'option_type': row.get('option_type', ''),
+            'calculation_success': row.get('calculation_success', False)
+        }
+        
+        if print_info:
+            print(f"📊 期权完整信息:")
+            print(f"   符号: {symbol}")
+            print(f"   时间: {target_dt.strftime('%Y-%m-%d %H:%M:%S')}")
+            print(f"   开盘价: {option_info['open']:.6f} BTC")
+            print(f"   IV: {option_info['iv']:.3f} ({option_info['iv_percent']:.1f}%)")
+            print(f"   Delta: {option_info['delta']:.3f}")
+            print(f"   Gamma: {option_info['gamma']:.6f}")
+            print(f"   Vega: {option_info['vega']:.6f}")
+            print(f"   执行价格: ${option_info['strike_price']:,.2f}")
+            print(f"   现货价格: ${option_info['spot_open']:,.2f}")
+            print(f"   到期天数: {option_info['days_to_expiry']:.1f}天")
+        
+        return option_info
+        
+    except Exception as e:
+        if print_info:
+            print(f"❌ 获取期权完整信息失败: {e}")
+        return None
+
 
 if __name__ == "__main__":
 

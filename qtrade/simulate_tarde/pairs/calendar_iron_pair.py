@@ -3,7 +3,7 @@ from datetime import datetime, date
 from qtrade.data_utils import get_option_open_price
 
 
-def find_calendar_spread_options(atm_options):
+def find_calendar_iron_spread_options(atm_options):
     '''
     寻找日历对角价差期权组合 - 选择IV价差最大的策略
     
@@ -224,7 +224,7 @@ def parse_option_expiry_date(symbol):
         return date(year, month, day)
     return None
 
-class CalendarPair:
+class CalendarIronPair:
     def __init__(self, call_diagonal, put_diagonal, entry_time, entry_spot_price):
         """日历对角价差组合"""
         self.entry_time = entry_time
