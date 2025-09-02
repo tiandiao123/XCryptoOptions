@@ -1,0 +1,144 @@
+# OKX Options Data - 排除大型数据文件
+okx_options/collected_klines_data/
+okx_options/options_with_spot/
+options_geeks/fixed_options_with_iv_greeks/
+
+# 🔧 修正：根据实际文件结构添加正确路径
+data/okx_data_processor/okx_options/collected_klines_data/
+data/okx_data_processor/okx_options/options_with_spot/
+
+# 🆕 分析结果文件夹 - 排除缓存和分析输出
+okx_options_analysis/__pycache__/
+okx_options_analysis/iv_rv_term_structure_analysis/
+okx_options_analysis/richness_analysis/
+okx_options_analysis/term_structure_analysis/
+okx_options_analysis/vol_analysis_results/
+
+# 其他常见的排除项
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+*.png
+
+# PyInstaller
+*.manifest
+*.spec
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Unit test / coverage reports
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+.pytest_cache/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# IPython
+profile_default/
+ipython_config.py
+
+# pyenv
+.python-version
+
+# pipenv
+Pipfile.lock
+
+# PEP 582
+__pypackages__/
+
+# Celery stuff
+celerybeat-schedule
+celerybeat.pid
+
+# SageMath parsed files
+*.sage.py
+
+# Environments
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Spyder project settings
+.spyderproject
+.spyproject
+
+# Rope project settings
+.ropeproject
+
+# mkdocs documentation
+/site
+
+# mypy
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Pyre type checker
+.pyre/
+
+# 数据文件
+*.csv
+*.parquet
+*.h5
+*.hdf5
+*.pkl
+*.pickle
+
+# 日志文件
+*.log
+logs/
+
+# 临时文件
+*.tmp
+*.temp
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# 结果文件夹（可选，根据需要调整）
+results/
+output/
+plots/
+figures/

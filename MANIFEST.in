@@ -1,0 +1,29 @@
+# MANIFEST.in for qtrade package
+# Include additional files in the distribution
+
+# Include documentation
+include README.md
+include requirements.txt
+include LICENSE
+
+# Include configuration files
+recursive-include qtrade *.py
+recursive-include qtrade *.sh
+recursive-include qtrade *.txt
+recursive-include qtrade *.csv
+
+# Include analysis results (optional)
+recursive-include qtrade/okx_options_analysis/richness_analysis *.png *.csv *.txt
+recursive-include qtrade/okx_options_analysis/term_structure_analysis *.png *.csv *.txt
+
+# Exclude Python bytecode and cache
+global-exclude *.pyc
+global-exclude *.pyo
+global-exclude __pycache__
+global-exclude .DS_Store
+global-exclude .git*
+
+# Exclude temporary files
+global-exclude *.tmp
+global-exclude *.log
+global-exclude .pytest_cache

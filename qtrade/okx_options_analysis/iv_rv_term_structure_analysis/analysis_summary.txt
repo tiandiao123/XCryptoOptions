@@ -1,0 +1,67 @@
+IV vs RV Term Structure Analysis Summary
+==================================================
+
+Analysis Period: 2024-08-27 to 2025-08-03
+Total Records: 929
+Unique Dates: 51
+
+
+7D_vs_30D Analysis:
+------------------------------
+Total Inverted Cases: 337
+
+Short-term IV vs RV:
+  IV > RV: 182 (54.0%)
+  IV < RV: 155 (46.0%)
+
+Long-term IV vs RV:
+  IV > RV: 123 (36.5%)
+  IV < RV: 214 (63.5%)
+
+Average Metrics:
+  Short-term IV: 58.24%
+  Long-term IV: 51.85%
+  Realized Vol: 69.24%
+  IV Spread: 6.39%
+  Short IV/RV Ratio: 0.94
+  Long IV/RV Ratio: 0.84
+
+14D_vs_60D Analysis:
+------------------------------
+Total Inverted Cases: 384
+
+Short-term IV vs RV:
+  IV > RV: 201 (52.3%)
+  IV < RV: 183 (47.7%)
+
+Long-term IV vs RV:
+  IV > RV: 151 (39.3%)
+  IV < RV: 233 (60.7%)
+
+Average Metrics:
+  Short-term IV: 56.98%
+  Long-term IV: 52.93%
+  Realized Vol: 68.32%
+  IV Spread: 4.04%
+  Short IV/RV Ratio: 0.97
+  Long IV/RV Ratio: 0.90
+
+30D_vs_90D Analysis:
+------------------------------
+Total Inverted Cases: 208
+
+Short-term IV vs RV:
+  IV > RV: 117 (56.2%)
+  IV < RV: 91 (43.8%)
+
+Long-term IV vs RV:
+  IV > RV: 93 (44.7%)
+  IV < RV: 115 (55.3%)
+
+Average Metrics:
+  Short-term IV: 57.35%
+  Long-term IV: 53.97%
+  Realized Vol: 65.39%
+  IV Spread: 3.38%
+  Short IV/RV Ratio: 1.00
+  Long IV/RV Ratio: 0.94

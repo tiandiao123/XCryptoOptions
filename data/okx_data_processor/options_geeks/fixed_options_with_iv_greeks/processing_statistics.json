@@ -1,0 +1,16 @@
+{
+  "processing_summary": {
+    "start_time": "2025-08-28T21:47:46.703545",
+    "end_time": "2025-08-29T05:24:29.866606",
+    "total_elapsed_seconds": 27403.163061,
+    "total_elapsed_hours": 7.611989739166667
+  },
+  "file_statistics": {
+    "total_files": 1692,
+    "processed_files": 1692,
+    "failed_files": 0,
+    "file_success_rate": 100.0
+  },
+  "data_statistics": {
+    "total_rows": 30366897,
+    "successful_calculations": 
