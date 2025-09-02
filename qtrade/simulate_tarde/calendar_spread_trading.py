@@ -52,7 +52,7 @@ def calculate_atm_iv_1month(atm_options):
     }
 
 
-def should_exclude_trade_pnl(calendar_pair, close_info, print_info=False):
+def should_exclude_trade_pnl(calendar_pair, close_info, current_spot_price, print_info=False):
     """
     检查是否应该排除这次交易的P&L（因为数据异常）
     
@@ -64,14 +64,18 @@ def should_exclude_trade_pnl(calendar_pair, close_info, print_info=False):
     Returns:
         tuple: (should_exclude, reason)
     """
+    spot_change_ratio = abs(current_spot_price - calendar_pair.entry_spot_price) / calendar_pair.entry_spot_price
+    spot_change_ratio_threshold = 0.02
+
     try:
+        
         # 获取入场和平仓时的IV信息
         entry_iv_spread = calendar_pair.entry_greeks['short_option']['iv'] - calendar_pair.entry_greeks['long_option']['iv']
         current_iv_spread = calendar_pair.get_iv_spread()
         
         # 1. 检查IV价差绝对值是否超过阈值
         iv_spread_threshold = 0.20  # 20%
-        if abs(current_iv_spread) > iv_spread_threshold:
+        if abs(current_iv_spread) > iv_spread_threshold and spot_change_ratio <= spot_change_ratio_threshold:
             if print_info:
                 print(f"⚠️  平仓IV价差异常: {current_iv_spread:+.1%} (阈值: ±{iv_spread_threshold:.1%})")
             return True, f"iv_spread_excessive: {current_iv_spread:+.1%}"
@@ -91,13 +95,13 @@ def should_exclude_trade_pnl(calendar_pair, close_info, print_info=False):
         long_iv_change = abs(calendar_pair.long_option_iv - calendar_pair.entry_greeks['long_option']['iv'])
         short_iv_change = abs(calendar_pair.short_option_iv - calendar_pair.entry_greeks['short_option']['iv'])
         
-        iv_change_threshold = 0.30  # 30%变化阈值
-        if long_iv_change > iv_change_threshold:
+        iv_change_threshold = 0.40  # 30%变化阈值
+        if long_iv_change > iv_change_threshold and spot_change_ratio <= spot_change_ratio_threshold:
             if print_info:
                 print(f"⚠️  Long期权IV变化过大: {long_iv_change:.1%}")
             return True, f"long_iv_change_excessive: {long_iv_change:.1%}"
         
-        if short_iv_change > iv_change_threshold:
+        if short_iv_change > iv_change_threshold and spot_change_ratio <= spot_change_ratio_threshold:
             if print_info:
                 print(f"⚠️  Short期权IV变化过大: {short_iv_change:.1%}")
             return True, f"short_iv_change_excessive: {short_iv_change:.1%}"
@@ -112,6 +116,99 @@ def should_exclude_trade_pnl(calendar_pair, close_info, print_info=False):
         
     except Exception as e:
         return True, f"exception_in_validation: {str(e)}"
+
+
+def log_excluded_trade_details(calendar_pair, close_info, exclude_reason, time_obj, spot, final_pnl, total_asset, log_file_path):
+    """
+    将被排除异常交易的详细信息记录到日志文件
+    
+    Args:
+        calendar_pair: Calendar组合对象
+        close_info: 平仓信息
+        exclude_reason: 排除原因
+        time_obj: 当前时间
+        spot: 现货价格
+        final_pnl: 最终P&L
+        total_asset: 总资产
+        log_file_path: 日志文件路径
+    """
+    try:
+        with open(log_file_path, 'a', encoding='utf-8') as f:
+            f.write(f"\n{'='*80}\n")
+            f.write(f"🚫 异常交易记录 - {time_obj.strftime('%Y-%m-%d %H:%M:%S')}\n")
+            f.write(f"{'='*80}\n")
+            
+            # 基本信息
+            f.write(f"排除原因: {exclude_reason}\n")
+            f.write(f"平仓原因: {close_info.get('reason', 'Unknown')}\n")
+            f.write(f"策略类型: {close_info['strategy_type']}\n")
+            f.write(f"被排除P&L: {final_pnl:.6f} BTC (不计入总资产)\n")
+            f.write(f"总资产保持: {total_asset:.6f} BTC\n")
+            f.write(f"现货价格: ${spot:,.0f}\n")
+            
+            # 现货变化分析
+            spot_change_rate = abs(spot - calendar_pair.entry_spot_price) / calendar_pair.entry_spot_price
+            spot_direction = "上涨" if spot > calendar_pair.entry_spot_price else "下跌" if spot < calendar_pair.entry_spot_price else "持平"
+            f.write(f"现货变化: ${calendar_pair.entry_spot_price:,.0f} → ${spot:,.0f} ({spot_direction} {spot_change_rate:.2%})\n")
+            
+            # IV变化详情
+            entry_iv_spread = calendar_pair.entry_greeks['short_option']['iv'] - calendar_pair.entry_greeks['long_option']['iv']
+            current_iv_spread = calendar_pair.get_iv_spread()
+            f.write(f"\n📊 IV变化分析:\n")
+            f.write(f"   IV价差变化: {entry_iv_spread:+.1%} → {current_iv_spread:+.1%}\n")
+            f.write(f"   Long IV变化: {calendar_pair.entry_greeks['long_option']['iv']:.1%} → {calendar_pair.long_option_iv:.1%}\n")
+            f.write(f"   Short IV变化: {calendar_pair.entry_greeks['short_option']['iv']:.1%} → {calendar_pair.short_option_iv:.1%}\n")
+            
+            # 期权价格变化详情
+            entry_long_price = calendar_pair.entry_greeks['long_option']['price']
+            entry_short_price = calendar_pair.entry_greeks['short_option']['price']
+            current_long_price = calendar_pair.long_option_price
+            current_short_price = calendar_pair.short_option_price
+            
+            # 计算价格变化百分比
+            long_price_change_pct = (current_long_price - entry_long_price) / entry_long_price if entry_long_price != 0 else 0
+            short_price_change_pct = (current_short_price - entry_short_price) / entry_short_price if entry_short_price != 0 else 0
+            
+            f.write(f"\n💰 期权价格变化详情:\n")
+            f.write(f"   Long期权: {entry_long_price:.6f} → {current_long_price:.6f} BTC ({long_price_change_pct:+.1%})\n")
+            f.write(f"   Short期权: {entry_short_price:.6f} → {current_short_price:.6f} BTC ({short_price_change_pct:+.1%})\n")
+            f.write(f"   入场权利金: {calendar_pair.entry_premium:.6f} BTC\n")
+            f.write(f"   当前权利金: {current_long_price - current_short_price:.6f} BTC\n")
+            
+            # 期权合约信息
+            f.write(f"\n📋 期权合约:\n")
+            f.write(f"   Long: {calendar_pair.option_symbols['long_option']} (${calendar_pair.long_strike:,.0f})\n")
+            f.write(f"   Short: {calendar_pair.option_symbols['short_option']} (${calendar_pair.short_strike:,.0f})\n")
+            
+            # 时间信息
+            f.write(f"\n⏰ 时间信息:\n")
+            f.write(f"   入场时间: {calendar_pair.entry_time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+            f.write(f"   平仓时间: {time_obj.strftime('%Y-%m-%d %H:%M:%S')}\n")
+            holding_hours = (time_obj - calendar_pair.entry_time).total_seconds() / 3600
+            f.write(f"   持仓时长: {holding_hours:.1f}小时\n")
+            
+            # 异常分析
+            f.write(f"\n🔍 异常分析:\n")
+            if spot_change_rate <= 0.02:
+                f.write(f"   ⚠️  现货小幅变化({spot_change_rate:.2%})但期权价格/IV大幅变动 → 疑似数据异常\n")
+            else:
+                f.write(f"   🌊 现货大幅变化({spot_change_rate:.2%})期间的异常数据\n")
+            
+            # 显示各项异常指标
+            long_iv_change = abs(calendar_pair.long_option_iv - calendar_pair.entry_greeks['long_option']['iv'])
+            short_iv_change = abs(calendar_pair.short_option_iv - calendar_pair.entry_greeks['short_option']['iv'])
+            iv_spread_change = abs(current_iv_spread - entry_iv_spread)
+            
+            f.write(f"   Long IV变化幅度: {long_iv_change:.1%}\n")
+            f.write(f"   Short IV变化幅度: {short_iv_change:.1%}\n")
+            f.write(f"   IV价差变化幅度: {iv_spread_change:.1%}\n")
+            f.write(f"   Long价格变化幅度: {abs(long_price_change_pct):.1%}\n")
+            f.write(f"   Short价格变化幅度: {abs(short_price_change_pct):.1%}\n")
+            
+            f.write(f"\n")
+            
+    except Exception as e:
+        print(f"⚠️  异常交易日志写入失败: {e}")
 
 
 def backtest_calendar_spread(data_folder: str, 
@@ -189,6 +286,17 @@ def backtest_calendar_spread(data_folder: str,
         'excluded_reasons': {},
         'excluded_pnl_sum': 0.0  # 被排除的P&L总和
     }
+
+    # 🆕 初始化异常交易日志文件
+    excluded_log_file = os.path.join(save_folder, 'excluded_trades_log.txt')
+    
+    # 清空旧的日志文件并写入头部
+    with open(excluded_log_file, 'w', encoding='utf-8') as f:
+        f.write(f"Calendar Spread Strategy - 异常交易排除日志\n")
+        f.write(f"回测开始时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+        f.write(f"数据文件夹: {data_folder}\n")
+        f.write(f"异常交易排除: {'启用' if exclude_abnormal_trades else '禁用'}\n")
+        f.write(f"{'='*80}\n")
 
     for time_point_data in iterator.iterate_date_range(start_date, end_date):
         processed_count += 1
@@ -337,7 +445,7 @@ def backtest_calendar_spread(data_folder: str,
                 
                 # 🆕 检查是否应该排除这次交易
                 should_exclude, exclude_reason = should_exclude_trade_pnl(
-                    calendar_pair, close_info, print_info=exclude_abnormal_trades
+                    calendar_pair, close_info, spot, print_info=exclude_abnormal_trades
                 )
                 
                 if exclude_abnormal_trades and should_exclude:
@@ -350,20 +458,12 @@ def backtest_calendar_spread(data_folder: str,
                     has_opened_position = False
                     sum_asset_pnl = total_asset  # 保持资产不变
                     
-                    print(f"\n🚫 异常交易已排除 - 不计入P&L: {reason}")
-                    print(f"   排除原因: {exclude_reason}")
-                    print(f"   时间: {time_obj.strftime('%Y-%m-%d %H:%M')}")
-                    print(f"   策略类型: {close_info['strategy_type']}")
-                    print(f"   被排除P&L: {final_pnl:.6f} BTC (不计入总资产)")
-                    print(f"   总资产保持: {total_asset:.6f} BTC")
-                    print(f"   现货价格: ${spot:,.0f}")
+                    # 🆕 记录详细信息到日志文件
+                    log_excluded_trade_details(calendar_pair, close_info, exclude_reason, time_obj, spot, final_pnl, total_asset, excluded_log_file)
                     
-                    # 🆕 显示异常数据详情
-                    entry_iv_spread = calendar_pair.entry_greeks['short_option']['iv'] - calendar_pair.entry_greeks['long_option']['iv']
-                    current_iv_spread = calendar_pair.get_iv_spread()
-                    print(f"   IV价差变化: {entry_iv_spread:+.1%} → {current_iv_spread:+.1%}")
-                    print(f"   Long IV变化: {calendar_pair.entry_greeks['long_option']['iv']:.1%} → {calendar_pair.long_option_iv:.1%}")
-                    print(f"   Short IV变化: {calendar_pair.entry_greeks['short_option']['iv']:.1%} → {calendar_pair.short_option_iv:.1%}")
+                    # 🆕 在控制台只显示简要信息
+                    print(f"\n🚫 异常交易已排除: {exclude_reason}")
+                    print(f"   时间: {time_obj.strftime('%Y-%m-%d %H:%M')} | P&L: {final_pnl:.6f} BTC | 详情→{excluded_log_file}")
                     
                 else:
                     # 🆕 正常交易，计入P&L
@@ -432,7 +532,7 @@ def backtest_calendar_spread(data_folder: str,
 
     # 最终更新图表
     if enable_plot:
-        update_plot(ax, line, time_list, sum_asset_pnl_list, init_btc, final_update=True)
+        update_plot(ax, line, time_list, sum_asset_pnl_list, init_btc)
         plt.savefig(os.path.join(save_folder, 'calendar_spread_backtest_result.png'), dpi=300, bbox_inches='tight')
         print(f"📊 图表已保存: {os.path.join(save_folder, 'calendar_spread_backtest_result.png')}")
 
@@ -500,7 +600,7 @@ def backtest_calendar_spread(data_folder: str,
     }
 
 
-def update_plot(ax, line, time_list, asset_list, init_btc, final_update=False):
+def update_plot(ax, line, time_list, asset_list, init_btc):
     """更新实时图表"""
     if not time_list or not asset_list:
         return
@@ -562,8 +662,8 @@ def update_plot(ax, line, time_list, asset_list, init_btc, final_update=False):
     ax.figure.canvas.draw()
     ax.figure.canvas.flush_events()
     
-    if final_update:
-        plt.tight_layout()
+
+    plt.tight_layout()
 
 
 
