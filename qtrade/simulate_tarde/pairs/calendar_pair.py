@@ -516,7 +516,7 @@ class CalendarPair:
             pnl_dollar = hedge_size * (current_spot_price - cost_spot_price)
             pnl = pnl_dollar / current_spot_price
         else:
-            pnl_dollar = hedge_size * (cost_spot_price - current_spot_price)
+            pnl_dollar = abs(hedge_size) * (cost_spot_price - current_spot_price)
             pnl = pnl_dollar / current_spot_price
         return pnl
 
@@ -906,7 +906,7 @@ class CalendarPair:
             current_iv_spread = self.get_iv_spread()
             
             # 如果入场时IV价差为正（有利），但现在变为负值，立即平仓
-            if entry_iv_spread > 0 and current_iv_spread < -0.02:
+            if entry_iv_spread > 0 and current_iv_spread < -0.01:
                 return True, f"IV价差反转平仓 (入场: {entry_iv_spread:+.1%} → 当前: {current_iv_spread:+.1%})"
             
             # 🆕 额外检查：如果IV价差大幅收敛（超过80%），也考虑平仓
@@ -956,7 +956,7 @@ class CalendarPair:
         closing_average_price = self.average_hedge_spot_price
         
         # 🆕 如果启用Delta对冲，先平掉永续合约
-        if self.delta_hedge_enabled and current_spot_price:
+        if self.delta_hedge_enabled and current_spot_price and "missing_greeks" not in close_reason:
             # 平掉永续合约，实现最终P&L
             final_hedge_pnl = self.calculate_hedge_pnl(
                 cost_spot_price=self.average_hedge_spot_price, 
@@ -975,6 +975,7 @@ class CalendarPair:
         
         # 计算最终总P&L
         final_total_pnl = self.current_options_pnl + self.realized_perpetual_pnl
+
         
         close_info = {
             'entry_time': self.entry_time,

@@ -10,6 +10,11 @@ import sys
 from tqdm import tqdm
 
 from qtrade.data_loader import ATMOptionsIterator
+from qtrade.simulate_tarde.vol_tracker.vol_tracker import VolTracker
+from qtrade.data_utils import get_option_full_info
+from qtrade.simulate_tarde.trading_utils import print_final_backtest_report
+
+from qtrade.simulate_tarde.pairs.calendar_pair import CalendarPair, find_atm_calendar_pair
 from qtrade.simulate_tarde.calendar_helper import (
     calculate_atm_iv_1month, 
     log_excluded_trade_details, 
@@ -19,15 +24,12 @@ from qtrade.simulate_tarde.calendar_helper import (
     update_plot,
 )
 
-from qtrade.simulate_tarde.metric_test import calculate_performance_metrics
-from qtrade.simulate_tarde.pairs.calendar_pair import CalendarPair, find_atm_calendar_pair
-from qtrade.simulate_tarde.vol_tracker.vol_tracker import VolTracker
-from qtrade.data_utils import get_option_full_info
+from qtrade.simulate_tarde.pairs.straddle_pair import StraddlePair, find_sell_straddle_opportunity
+from qtrade.simulate_tarde.straddle_helper import (
+    print_straddle_opening_info, print_straddle_closing_info,
+    should_exclude_straddle_trade, log_excluded_straddle_trade
+)
 
-# 设置matplotlib支持中文和交互模式
-plt.rcParams['font.sans-serif'] = ['DejaVu Sans', 'SimHei', 'Arial Unicode MS']
-plt.rcParams['axes.unicode_minus'] = False
-plt.ion()  # 开启交互模式
 
 
 def get_predicted_volatility(vol_tracker, spot_price, time_obj):
@@ -42,7 +44,7 @@ def get_predicted_volatility(vol_tracker, spot_price, time_obj):
     Returns:
         tuple: (predicted_vol, vol_model, vol_result)
     """
-    # 🆕 更新波动率跟踪器
+    # 更新波动率跟踪器
     vol_result = vol_tracker.add_price(spot_price, time_obj)
     
     # 选择可用的波动率预测
@@ -62,21 +64,413 @@ def get_predicted_volatility(vol_tracker, spot_price, time_obj):
     return predicted_vol, vol_model, vol_result
 
 
-def trade_calendar_spread():
-    pass 
+def process_calendar_trading_position(
+    # 位置状态
+    has_opened_position,
+    calendar_pair,
+    # 数据相关
+    atm_options,
+    time_point_data,
+    time_obj,
+    spot,
+    date,
+    predicted_vol,
+    vol_model,
+    vol_result,
+    iv_1month,
+    processed_count,
+    # 统计相关
+    opportunities_found,
+    unique_dates_with_opportunities,
+    total_asset,
+    trade_quality_stats,
+    excluded_log_file,
+    # 配置参数
+    enable_delta_hedge=False,
+    delta_threshold=0.05,
+    inverse_contract_multiplier=1.0,
+    hedge_cost_bps=0.0002,
+    exclude_abnormal_trades=True
+):
+    """
+    处理Calendar Spread交易位置的完整逻辑
+    
+    Returns:
+        tuple: (has_opened_position, calendar_pair, opportunities_found, 
+                unique_dates_with_opportunities, total_asset, sum_asset_pnl)
+    """
+    
+    sum_asset_pnl = total_asset
+    
+    # 检查Calendar Spread机会
+    if not has_opened_position:
+        calendar_spread_options = find_atm_calendar_pair(atm_options)
+        
+        if calendar_spread_options:
+            has_opened_position = True
+            opportunities_found += 1
+            unique_dates_with_opportunities.add(date)
+
+            calendar_pair = CalendarPair(
+                calendar_spread_options['calendar_spread'], 
+                time_obj, 
+                spot,
+                delta_hedge_enabled=enable_delta_hedge,
+                delta_threshold=delta_threshold,
+                contract_multiplier=inverse_contract_multiplier
+            )
+            
+            # 初始化Delta对冲
+            if enable_delta_hedge:
+                hedge_success, hedge_info = calendar_pair.initialize_hedge(
+                    current_time=time_obj,
+                    current_spot_price=spot,
+                    hedge_cost_bps=hedge_cost_bps,
+                    print_info=True
+                )
+            
+            # 打印开仓信息
+            print_opening_position_info(
+                calendar_pair, 
+                calendar_spread_options, 
+                spot, 
+                time_obj, 
+                predicted_vol, 
+                vol_model, 
+                vol_result, 
+                iv_1month
+            )
+    else:
+        # 更新持仓P&L
+        update_success, failure_reason = calendar_pair.update_pnl(
+            time_obj, 
+            time_point_data['data'], 
+            spot,
+            atm_options,
+            print_info=False
+        )
+        
+        # 每100个时间点显示一次希腊字母变化
+        if processed_count % 100 == 0 and update_success:
+            greeks_summary = calendar_pair.get_current_greeks_summary()
+            greeks_change = calendar_pair.get_greeks_change_since_entry()
+            
+            print(f"📊 希腊字母监控 - {time_obj.strftime('%m-%d %H:%M')}")
+            print(f"   净Delta: {greeks_summary['net_delta']:+.3f} (变化: {greeks_change['delta_change']['net']:+.3f})")
+            print(f"   IV价差: {greeks_summary['iv_spread']:+.1%} (变化: {greeks_change['iv_change']['spread']:+.1%})")
+            print(f"   当前P&L: {calendar_pair.current_pnl:+.6f} BTC")
+            # 添加对冲监控信息
+            if calendar_pair.delta_hedge_enabled and calendar_pair.current_hedge_delta != 0:
+                print(f"   对冲头寸: {calendar_pair.current_hedge_delta:+.3f} BTC")
+                print(f"   平均持仓价: ${calendar_pair.average_hedge_spot_price:,.0f}")
+                print(f"   当前现货价: ${spot:,.0f}")
+        
+        if update_success:
+            should_close, reason = calendar_pair.should_close(time_obj, spot, iv_reversal_close=True)
+        else:
+            should_close = True
+            
+            if "expired" in failure_reason:
+                reason = f"期权到期平仓 ({failure_reason})"
+            elif "missing_prices" in failure_reason:
+                reason = f"无法获取期权价格，强制平仓 ({failure_reason})"
+            else:
+                reason = f"P&L更新失败，强制平仓 ({failure_reason})"
+            
+            print(f"⚠️  强制平仓原因: {reason}")
+            print(f"   时间: {time_obj.strftime('%Y-%m-%d %H:%M')}")
+            print(f"   使用上次P&L: {calendar_pair.current_pnl:.6f} BTC")
+
+        if should_close:
+            trade_quality_stats['total_trades'] += 1
+            
+            # 获取平仓时刻的期权完整信息
+            long_current = get_option_full_info(
+                time_point_data['data'], 
+                calendar_pair.option_symbols['long_option'], 
+                time_obj, 
+                print_info=False
+            )
+            short_current = get_option_full_info(
+                time_point_data['data'], 
+                calendar_pair.option_symbols['short_option'], 
+                time_obj, 
+                print_info=False
+            )
+            
+            # 保存P&L并平仓
+            final_pnl = calendar_pair.current_pnl
+            close_info = calendar_pair.close(time_obj, reason, current_spot_price=spot)
+
+            # 检查是否应该排除这次交易
+            should_exclude, exclude_reason = should_exclude_trade_pnl(
+                calendar_pair, close_info, spot, print_info=exclude_abnormal_trades
+            )
+            
+            if exclude_abnormal_trades and should_exclude:
+                # 排除异常交易，不计入P&L
+                trade_quality_stats['excluded_trades'] += 1
+                trade_quality_stats['excluded_reasons'][exclude_reason] = trade_quality_stats['excluded_reasons'].get(exclude_reason, 0) + 1
+                trade_quality_stats['excluded_pnl_sum'] += final_pnl
+                
+                # 更新状态但不更新资产（P&L归零）
+                has_opened_position = False
+                sum_asset_pnl = total_asset  # 保持资产不变
+                
+                # 记录详细信息到日志文件
+                log_excluded_trade_details(calendar_pair, close_info, exclude_reason, time_obj, spot, final_pnl, total_asset, excluded_log_file)
+                
+                # 在控制台只显示简要信息
+                print(f"\n🚫 异常交易已排除: {exclude_reason}")
+                print(f"   时间: {time_obj.strftime('%Y-%m-%d %H:%M')} | P&L: {final_pnl:.6f} BTC | 详情→{excluded_log_file}")
+                
+            else:
+                # 正常交易，计入P&L
+                has_opened_position = False
+                total_asset += final_pnl
+                sum_asset_pnl = total_asset
+                
+                # 使用函数打印平仓信息
+                print_closing_position_info(
+                    calendar_pair=calendar_pair,
+                    close_info=close_info,
+                    reason=reason,
+                    time_obj=time_obj,
+                    spot=spot,
+                    final_pnl=final_pnl,
+                    long_current=long_current,
+                    short_current=short_current,
+                    total_asset=total_asset
+                )
+                
+            calendar_pair = None
+
+        else:
+            sum_asset_pnl = total_asset + calendar_pair.current_pnl
+
+    return (has_opened_position, calendar_pair, opportunities_found, 
+            unique_dates_with_opportunities, total_asset, sum_asset_pnl)
 
 
-def backtest_calendar_spread(data_folder: str, 
-                            init_btc: float = 1.0, 
-                            enable_plot: bool = True, 
-                            plot_update_interval: int = 500, 
-                            save_folder: str = 'calendar_spread_backtest_result',
-                            exclude_abnormal_trades: bool = True,
-                            # Delta对冲参数
-                            enable_delta_hedge: bool = False,
-                            delta_threshold: float = 0.05,
-                            hedge_cost_bps: float = 0.0002,
-                            inverse_contract_multiplier: float = 1.0):
+
+# 添加到 qtrade/simulate_tarde/spread_trading.py
+
+def process_straddle_trading_position(
+    # 位置状态
+    has_opened_position,
+    straddle_pair,
+    # 数据相关
+    atm_options,
+    time_point_data,
+    time_obj,
+    spot,
+    date,
+    predicted_vol,
+    vol_model,
+    vol_result,
+    iv_1month,
+    processed_count,
+    # 统计相关
+    opportunities_found,
+    unique_dates_with_opportunities,
+    total_asset,
+    trade_quality_stats,
+    excluded_log_file,
+    # 配置参数
+    enable_delta_hedge=False,
+    delta_threshold=0.05,
+    inverse_contract_multiplier=1.0,
+    hedge_cost_bps=0.0002,
+    exclude_abnormal_trades=True,
+    # Straddle特定参数
+    iv_threshold_pct=0.05
+):
+    """
+    处理Straddle交易位置的完整逻辑 - 专注于Sell Straddle
+    
+    Returns:
+        tuple: (has_opened_position, straddle_pair, opportunities_found, 
+                unique_dates_with_opportunities, total_asset, sum_asset_pnl)
+    """
+    
+    sum_asset_pnl = total_asset
+    
+    # 检查Sell Straddle机会
+    if not has_opened_position:
+        straddle_opportunity = find_sell_straddle_opportunity(atm_options, predicted_vol, iv_threshold_pct)
+        
+
+        if straddle_opportunity:
+            has_opened_position = True
+            opportunities_found += 1
+            unique_dates_with_opportunities.add(date)
+
+            # 构建完整的 straddle_config
+            straddle_config = {
+                'straddle': straddle_opportunity['straddle'],
+                'strategy_type': straddle_opportunity['strategy_type']
+            }
+
+            
+            straddle_pair = StraddlePair(
+                straddle_config,  # 传入完整的配置
+                time_obj,
+                spot,
+                delta_hedge_enabled=enable_delta_hedge,
+                delta_threshold=delta_threshold,
+                contract_multiplier=inverse_contract_multiplier
+            )
+            
+            # 初始化Delta对冲
+            if enable_delta_hedge:
+                hedge_success, hedge_info = straddle_pair.initialize_hedge(
+                    current_time=time_obj,
+                    current_spot_price=spot,
+                    hedge_cost_bps=hedge_cost_bps,
+                    print_info=True
+                )
+            
+            # 打印开仓信息
+            print_straddle_opening_info(
+                straddle_pair,
+                straddle_opportunity,
+                spot,
+                time_obj,
+                predicted_vol,
+                vol_model,
+                vol_result,
+                iv_1month
+            )
+
+    else:
+        # 更新持仓P&L
+        update_success, failure_reason = straddle_pair.update_pnl(
+            time_obj,
+            time_point_data['data'],
+            spot,
+            atm_options,
+            print_info=False
+        )
+        
+        # 每100个时间点显示一次希腊字母变化
+        if processed_count % 100 == 0 and update_success:
+            greeks_summary = straddle_pair.get_current_greeks_summary()
+            greeks_change = straddle_pair.get_greeks_change_since_entry()
+            
+            print(f"📊 Straddle希腊字母监控 - {time_obj.strftime('%m-%d %H:%M')}")
+            print(f"   净Delta: {greeks_summary['net_delta']:+.3f} (变化: {greeks_change['delta_change']['net']:+.3f})")
+            print(f"   当前P&L: {straddle_pair.current_pnl:+.6f} BTC")
+            print(f"   Moneyness: {spot / straddle_pair.strike_price:.3f}")
+            # 添加对冲监控信息
+            if straddle_pair.delta_hedge_enabled and straddle_pair.current_hedge_delta != 0:
+                print(f"   对冲头寸: {straddle_pair.current_hedge_delta:+.3f} BTC")
+                print(f"   平均持仓价: ${straddle_pair.average_hedge_spot_price:,.0f}")
+                print(f"   当前现货价: ${spot:,.0f}")
+        
+        if update_success:
+            should_close, reason = straddle_pair.should_close(time_obj, spot, iv_reversal_close=True)
+        else:
+            should_close = True
+            
+            if "expired" in failure_reason:
+                reason = f"期权到期平仓 ({failure_reason})"
+            elif "missing_prices" in failure_reason:
+                reason = f"无法获取期权价格，强制平仓 ({failure_reason})"
+            else:
+                reason = f"P&L更新失败，强制平仓 ({failure_reason})"
+            
+            print(f"⚠️  强制平仓原因: {reason}")
+            print(f"   时间: {time_obj.strftime('%Y-%m-%d %H:%M')}")
+            print(f"   使用上次P&L: {straddle_pair.current_pnl:.6f} BTC")
+
+        if should_close:
+            trade_quality_stats['total_trades'] += 1
+            
+            # 获取平仓时刻的期权完整信息
+            call_current = get_option_full_info(
+                time_point_data['data'],
+                straddle_pair.option_symbols['call'],
+                time_obj,
+                print_info=False
+            )
+            put_current = get_option_full_info(
+                time_point_data['data'],
+                straddle_pair.option_symbols['put'],
+                time_obj,
+                print_info=False
+            )
+            
+            # 保存P&L并平仓
+            # final_pnl = straddle_pair.current_pnl
+            
+            close_info = straddle_pair.close(time_obj, reason, current_spot_price=spot)
+            # final_pnl = close_info.get('final_total_pnl', straddle_pair.current_pnl)
+            final_pnl = straddle_pair.current_pnl
+            # 检查是否应该排除这次交易
+            should_exclude, exclude_reason = should_exclude_straddle_trade(
+                straddle_pair, close_info, spot, print_info=exclude_abnormal_trades
+            )
+            
+            if exclude_abnormal_trades and should_exclude:
+                # 排除异常交易，不计入P&L
+                trade_quality_stats['excluded_trades'] += 1
+                trade_quality_stats['excluded_reasons'][exclude_reason] = trade_quality_stats['excluded_reasons'].get(exclude_reason, 0) + 1
+                trade_quality_stats['excluded_pnl_sum'] += final_pnl
+                
+                # 更新状态但不更新资产（P&L归零）
+                has_opened_position = False
+                sum_asset_pnl = total_asset  # 保持资产不变
+                
+                # 记录详细信息到日志文件
+                log_excluded_straddle_trade(straddle_pair, close_info, exclude_reason, time_obj, spot, final_pnl, total_asset, excluded_log_file)
+                
+                # 在控制台只显示简要信息
+                print(f"\n🚫 Straddle异常交易已排除: {exclude_reason}")
+                print(f"   时间: {time_obj.strftime('%Y-%m-%d %H:%M')} | P&L: {final_pnl:.6f} BTC | 详情→{excluded_log_file}")
+                
+            else:
+                # 正常交易，计入P&L
+                has_opened_position = False
+                total_asset += final_pnl
+                sum_asset_pnl = total_asset
+                
+                # 使用函数打印平仓信息
+                print_straddle_closing_info(
+                    straddle_pair=straddle_pair,
+                    close_info=close_info,
+                    reason=reason,
+                    time_obj=time_obj,
+                    spot=spot,
+                    final_pnl=final_pnl,
+                    call_current=call_current,
+                    put_current=put_current,
+                    total_asset=total_asset
+                )
+
+                # if opportunities_found == 2:
+                #     exit(0)
+                
+            straddle_pair = None
+
+        else:
+            sum_asset_pnl = total_asset + straddle_pair.current_pnl
+
+    return (has_opened_position, straddle_pair, opportunities_found, 
+            unique_dates_with_opportunities, total_asset, sum_asset_pnl)
+
+
+def backtest_strategy(data_folder: str, 
+                    init_btc: float = 1.0, 
+                    enable_plot: bool = True, 
+                    plot_update_interval: int = 500, 
+                    save_folder: str = 'calendar_spread_backtest_result',
+                    exclude_abnormal_trades: bool = True,
+                    # Delta对冲参数
+                    enable_delta_hedge: bool = False,
+                    delta_threshold: float = 0.05,
+                    hedge_cost_bps: float = 0.0002,
+                    inverse_contract_multiplier: float = 1.0, 
+                    strategy_name: str = "calendar_spread"):
     """
     Calendar Spread回测 - 增加异常交易排除功能
     """
@@ -164,163 +558,73 @@ def backtest_calendar_spread(data_folder: str,
 
         unique_dates.add(date)
         
-        # 🆕 获取预测波动率
+        # 获取预测波动率
         predicted_vol, vol_model, vol_result = get_predicted_volatility(vol_tracker, spot, time_obj)
         
-        # 🆕 计算1个月ATM IV
+        # 计算1个月ATM IV
         iv_1month = calculate_atm_iv_1month(atm_options)
         
-        # 检查Calendar Spread机会
-        if has_opened_position is False:
-            calendar_spread_options = find_atm_calendar_pair(atm_options)
-        
-            if calendar_spread_options:
-                has_opened_position = True
-                opportunities_found += 1
-                unique_dates_with_opportunities.add(date)
-
-                calendar_pair = CalendarPair(
-                    calendar_spread_options['calendar_spread'], 
-                    time_obj, 
-                    spot,
-                    delta_hedge_enabled=enable_delta_hedge,
-                    delta_threshold=delta_threshold,
-                    contract_multiplier=inverse_contract_multiplier  # 🆕 添加合约乘数
-                )
-                
-                # 🆕 初始化Delta对冲
-                if enable_delta_hedge:
-                    hedge_success, hedge_info = calendar_pair.initialize_hedge(
-                        current_time=time_obj,
-                        current_spot_price=spot,
-                        hedge_cost_bps=hedge_cost_bps,
-                        print_info=True
-                    )
-                
-                # 🔧 替换原来的所有打印代码为一个函数调用
-                print_opening_position_info(
-                    calendar_pair, 
-                    calendar_spread_options, 
-                    spot, 
-                    time_obj, 
-                    predicted_vol, 
-                    vol_model, 
-                    vol_result, 
-                    iv_1month
-                )
-        else:
-            # 🆕 更新持仓P&L（现在包含希腊字母更新）
-            update_success, failure_reason = calendar_pair.update_pnl(
-                time_obj, 
-                time_point_data['data'], 
-                spot,
-                atm_options,  # 🆕 传入ATM期权列表
-                print_info=False
+        # 处理Calendar Spread交易
+        if strategy_name == "calendar_spread":
+            (has_opened_position, calendar_pair, opportunities_found, 
+            unique_dates_with_opportunities, total_asset, sum_asset_pnl) = process_calendar_trading_position(
+                has_opened_position=has_opened_position,
+                calendar_pair=calendar_pair,
+                atm_options=atm_options,
+                time_point_data=time_point_data,
+                time_obj=time_obj,
+                spot=spot,
+                date=date,
+                predicted_vol=predicted_vol,
+                vol_model=vol_model,
+                vol_result=vol_result,
+                iv_1month=iv_1month,
+                processed_count=processed_count,
+                opportunities_found=opportunities_found,
+                unique_dates_with_opportunities=unique_dates_with_opportunities,
+                total_asset=total_asset,
+                trade_quality_stats=trade_quality_stats,
+                excluded_log_file=excluded_log_file,
+                enable_delta_hedge=enable_delta_hedge,
+                delta_threshold=delta_threshold,
+                inverse_contract_multiplier=inverse_contract_multiplier,
+                hedge_cost_bps=hedge_cost_bps,
+                exclude_abnormal_trades=exclude_abnormal_trades
             )
+        elif strategy_name == "gamma_scalping_sell_straddle":
+            (has_opened_position, straddle_pair, opportunities_found, 
+             unique_dates_with_opportunities, total_asset, sum_asset_pnl) = process_straddle_trading_position(
+                has_opened_position=has_opened_position,
+                straddle_pair=straddle_pair if 'straddle_pair' in locals() else None,
+                atm_options=atm_options,
+                time_point_data=time_point_data,
+                time_obj=time_obj,
+                spot=spot,
+                date=date,
+                predicted_vol=predicted_vol,
+                vol_model=vol_model,
+                vol_result=vol_result,
+                iv_1month=iv_1month,
+                processed_count=processed_count,
+                opportunities_found=opportunities_found,
+                unique_dates_with_opportunities=unique_dates_with_opportunities,
+                total_asset=total_asset,
+                trade_quality_stats=trade_quality_stats,
+                excluded_log_file=excluded_log_file,
+                enable_delta_hedge=enable_delta_hedge,
+                delta_threshold=delta_threshold,
+                inverse_contract_multiplier=inverse_contract_multiplier,
+                hedge_cost_bps=hedge_cost_bps,
+                exclude_abnormal_trades=exclude_abnormal_trades,
+                iv_threshold_pct=0.05
+            )
+        elif strategy_name == "gamma_scalping_sell_calendar_spread":
+            pass
+        else:
+            raise ValueError(f"策略名称 {strategy_name} 不在策略集合中")
+
+            # handle sell straddle options 
             
-            # 🆕 每100个时间点显示一次希腊字母变化
-            if processed_count % 100 == 0 and update_success:
-                greeks_summary = calendar_pair.get_current_greeks_summary()
-                greeks_change = calendar_pair.get_greeks_change_since_entry()
-                
-                print(f"📊 希腊字母监控 - {time_obj.strftime('%m-%d %H:%M')}")
-                print(f"   净Delta: {greeks_summary['net_delta']:+.3f} (变化: {greeks_change['delta_change']['net']:+.3f})")
-                print(f"   IV价差: {greeks_summary['iv_spread']:+.1%} (变化: {greeks_change['iv_change']['spread']:+.1%})")
-                print(f"   当前P&L: {calendar_pair.current_pnl:+.6f} BTC")
-                # 🆕 添加对冲监控信息
-                if calendar_pair.delta_hedge_enabled and calendar_pair.current_hedge_delta != 0:
-                    print(f"   对冲头寸: {calendar_pair.current_hedge_delta:+.3f} BTC")
-                    print(f"   平均持仓价: ${calendar_pair.average_hedge_spot_price:,.0f}")
-                    print(f"   当前现货价: ${spot:,.0f}")
-            
-            if update_success:
-                should_close, reason = calendar_pair.should_close(time_obj, spot, iv_reversal_close=True)
-            else:
-                should_close = True
-                
-                if "expired" in failure_reason:
-                    reason = f"期权到期平仓 ({failure_reason})"
-                elif "missing_prices" in failure_reason:
-                    reason = f"无法获取期权价格，强制平仓 ({failure_reason})"
-                else:
-                    reason = f"P&L更新失败，强制平仓 ({failure_reason})"
-                
-                print(f"⚠️  强制平仓原因: {reason}")
-                print(f"   时间: {time_obj.strftime('%Y-%m-%d %H:%M')}")
-                print(f"   使用上次P&L: {calendar_pair.current_pnl:.6f} BTC")
-
-            if should_close:
-                trade_quality_stats['total_trades'] += 1
-                
-                # 🆕 获取平仓时刻的期权完整信息
-                long_current = get_option_full_info(
-                    time_point_data['data'], 
-                    calendar_pair.option_symbols['long_option'], 
-                    time_obj, 
-                    print_info=False
-                )
-                short_current = get_option_full_info(
-                    time_point_data['data'], 
-                    calendar_pair.option_symbols['short_option'], 
-                    time_obj, 
-                    print_info=False
-                )
-                
-                # 保存P&L并平仓
-                final_pnl = calendar_pair.current_pnl
-                close_info = calendar_pair.close(time_obj, reason, current_spot_price=spot)  # 🔧 添加现货价格
-                
-
-
-                # 🆕 检查是否应该排除这次交易
-                should_exclude, exclude_reason = should_exclude_trade_pnl(
-                    calendar_pair, close_info, spot, print_info=exclude_abnormal_trades
-                )
-                
-                if exclude_abnormal_trades and should_exclude:
-                    # 🆕 排除异常交易，不计入P&L
-                    trade_quality_stats['excluded_trades'] += 1
-                    trade_quality_stats['excluded_reasons'][exclude_reason] = trade_quality_stats['excluded_reasons'].get(exclude_reason, 0) + 1
-                    trade_quality_stats['excluded_pnl_sum'] += final_pnl
-                    
-                    # 更新状态但不更新资产（P&L归零）
-                    has_opened_position = False
-                    sum_asset_pnl = total_asset  # 保持资产不变
-                    
-                    # 🆕 记录详细信息到日志文件
-                    log_excluded_trade_details(calendar_pair, close_info, exclude_reason, time_obj, spot, final_pnl, total_asset, excluded_log_file)
-                    
-                    # 🆕 在控制台只显示简要信息
-                    print(f"\n🚫 异常交易已排除: {exclude_reason}")
-                    print(f"   时间: {time_obj.strftime('%Y-%m-%d %H:%M')} | P&L: {final_pnl:.6f} BTC | 详情→{excluded_log_file}")
-                    
-                else:
-                    # 正常交易，计入P&L
-                    has_opened_position = False
-                    total_asset += final_pnl
-                    sum_asset_pnl = total_asset
-                    
-                    # 🆕 使用函数打印平仓信息
-                    print_closing_position_info(
-                        calendar_pair=calendar_pair,
-                        close_info=close_info,
-                        reason=reason,
-                        time_obj=time_obj,
-                        spot=spot,
-                        final_pnl=final_pnl,
-                        long_current=long_current,
-                        short_current=short_current,
-                        total_asset=total_asset
-                    )
-                    
-                    calendar_pair = None
-
-                # # 调试
-                # if opportunities_found == 6:
-                #     exit(0)
-
-            else:
-                sum_asset_pnl = total_asset + calendar_pair.current_pnl
 
         # 记录时间和资产数据
         sum_asset_pnl_list.append(sum_asset_pnl)
@@ -355,76 +659,52 @@ def backtest_calendar_spread(data_folder: str,
 
     # 最终统计
     total_elapsed = time.time() - start_time
-    unique_dates_count = len(unique_dates_with_opportunities)
-    total_unique_dates = len(unique_dates)
-    final_return = (sum_asset_pnl - init_btc) / init_btc * 100
     
-    print(f"\n" + "="*60)
-    print(f"🎉 Calendar Spread回测完成！")
-    print(f"="*60)
-    print(f"📊 基础统计:")
-    print(f"   总时间点: {processed_count:,}")
-    print(f"   套利机会: {opportunities_found:,}")
-    print(f"   机会比例: {opportunities_found/processed_count*100:.3f}%")
-    print(f"   有机会天数: {unique_dates_count:,}/{total_unique_dates:,}")
-    print(f"   天数比例: {unique_dates_count/total_unique_dates*100:.2f}%")
-    print(f"   用时: {total_elapsed/60:.1f}分钟")
-    
-    print(f"\n💰 最终结果:")
-    print(f"   初始资产: {init_btc:.6f} BTC")
-    print(f"   最终资产: {sum_asset_pnl:.6f} BTC")
-    print(f"   总收益: {sum_asset_pnl - init_btc:+.6f} BTC")
-    print(f"   总收益率: {final_return:+.2f}%")
-    print(f"="*60)
-    
-    # 🆕 最终显示交易质量报告
-    if exclude_abnormal_trades:
-        exclude_rate = trade_quality_stats['excluded_trades'] / max(trade_quality_stats['total_trades'], 1) * 100
-        
-        print(f"\n📊 交易质量报告:")
-        print(f"   总交易数: {trade_quality_stats['total_trades']:,}")
-        print(f"   排除交易数: {trade_quality_stats['excluded_trades']:,} ({exclude_rate:.1f}%)")
-        print(f"   有效交易率: {100-exclude_rate:.1f}%")
-        print(f"   被排除P&L总和: {trade_quality_stats['excluded_pnl_sum']:+.6f} BTC")
-        
-        if trade_quality_stats['excluded_reasons']:
-            print(f"   排除原因统计:")
-            for reason, count in trade_quality_stats['excluded_reasons'].items():
-                print(f"     {reason}: {count:,}次")
-    
-    # 保持图表显示
-    if enable_plot:
-        plt.ioff()
-        plt.show()
-    
-
-    print(f"\n📊 性能指标:")
-    metrics = calculate_performance_metrics(time_list, sum_asset_pnl_list, init_btc, save_folder=save_folder)
-    if metrics:
-        print(f"   年化收益率: {metrics['annualized_return']*100:+.2f}%")
-        print(f"   年化波动率: {metrics['annualized_volatility']*100:.2f}%") 
-        print(f"   Sharpe比率: {metrics['sharpe_ratio']:.3f}")
-        print(f"   Sortino比率: {metrics['sortino_ratio']:.3f}")
-        print(f"   最大回撤: {metrics['max_drawdown']*100:.2f}%")
-        print(f"   Calmar比率: {metrics['calmar_ratio']:.3f}")
-        print(f"   日胜率: {metrics['win_rate']*100:.1f}%")
+    # 打印最终报告
+    metrics = print_final_backtest_report(
+        processed_count=processed_count,
+        opportunities_found=opportunities_found,
+        unique_dates_with_opportunities=unique_dates_with_opportunities,
+        unique_dates=unique_dates,
+        total_elapsed=total_elapsed,
+        init_btc=init_btc,
+        sum_asset_pnl=sum_asset_pnl,
+        trade_quality_stats=trade_quality_stats,
+        exclude_abnormal_trades=exclude_abnormal_trades,
+        time_list=time_list,
+        sum_asset_pnl_list=sum_asset_pnl_list,
+        save_folder=save_folder,
+        enable_plot=enable_plot,
+        strategy_name="Calendar Spread Strategy"
+    )
 
 if __name__ == "__main__":
     data_folder = '/home/ubuntu/options_trading/data/okx_data_processor/options_geeks/fixed_options_with_iv_greeks'
     
+    strategy_set = set([
+        "calendar_spread",
+        "gamma_scalping_sell_straddle",
+        "gamma_scalping_sell_calendar_spread",
+    ])
+
+    strategy_name = "calendar_spread"
+
+    assert strategy_name in strategy_set, f"策略名称 {strategy_name} 不在策略集合中"
+    
     # 🚀 运行Calendar Spread回测
-    backtest_calendar_spread(
+    backtest_strategy(
         data_folder=data_folder, 
         init_btc=1.0,
         enable_plot=True,
         plot_update_interval=500,
         exclude_abnormal_trades=True,
-        save_folder='delta_hedge_calendar_spread_backtest_2',
+        save_folder='calendar_spread_backtest',
         # 🆕 Delta对冲参数
-        enable_delta_hedge=True,  # 启用Delta对冲
+        enable_delta_hedge=False,  # 启用Delta对冲
         delta_threshold=0.05,     # 5% Delta阈值
         hedge_cost_bps=0.0000,   # 2bps手续费
-        inverse_contract_multiplier=1.0
+        inverse_contract_multiplier=1.0, 
+        strategy_name=strategy_name
     )
 
 

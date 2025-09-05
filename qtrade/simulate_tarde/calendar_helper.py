@@ -10,6 +10,9 @@ import numpy as np
 import sys
 from tqdm import tqdm
 
+from qtrade.data_utils import get_option_full_info
+from qtrade.simulate_tarde.pairs.calendar_pair import CalendarPair, find_atm_calendar_pair
+
 def calculate_atm_iv_1month(atm_options):
     """
     计算1个月ATM期权的IV均值
@@ -246,7 +249,6 @@ def print_opening_position_info(calendar_pair, calendar_spread_options, spot, ti
         print(f"   Delta敞口: ~{delta_exposure_btc:.3f} BTC (~${delta_exposure_usd:,.0f})")
     else:
         print(f"   ✅ Delta在可接受范围内")
-
 
 
 def log_excluded_trade_details(calendar_pair, close_info, exclude_reason, time_obj, spot, final_pnl, total_asset, log_file_path):

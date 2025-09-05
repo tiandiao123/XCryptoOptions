@@ -1,5 +1,6 @@
 import re
 import numpy as np
+import time
 from datetime import datetime, date
 from qtrade.data_utils import get_option_open_price, get_option_full_info
 
@@ -512,8 +513,20 @@ class StraddlePair:
             self.inverse_perpetual_pnl = 0.0
             self.realized_perpetual_pnl = 0.0
         
+        # print("updating PNL ")
+        # print(f"self.current_options_pnl: {self.current_options_pnl}")
+        # print(f"self.entry_premium: {self.entry_premium}")
+        # print(f"current_premium: {current_premium}")
+        # print(f"self.current_options_pnl: {self.current_options_pnl}")
+        # print(f"self.inverse_perpetual_pnl: {self.inverse_perpetual_pnl}")
+        # print(f"self.realized_perpetual_pnl: {self.realized_perpetual_pnl}")
+        # print(f"current hedge size {self.current_hedge_delta} with average hedge price {self.average_hedge_spot_price} and current spot price {current_spot_price}")
+        # print(f"current inverse total pnl: {self.inverse_perpetual_pnl + self.realized_perpetual_pnl}")
         self.current_pnl = self.current_options_pnl + self.inverse_perpetual_pnl + self.realized_perpetual_pnl
-        
+        # print(f"self.current_pnl: {self.current_pnl} \n")
+
+
+
         if print_info:
             print(f"📊 Straddle P&L更新 - 时间: {current_time.strftime('%Y-%m-%d %H:%M')}")
             print(f"   策略类型: {self.strategy_type.replace('_', ' ').title()}")
@@ -620,12 +633,14 @@ class StraddlePair:
             pnl_dollar = hedge_size * (current_spot_price - cost_spot_price)
             pnl = pnl_dollar / current_spot_price
         else:
-            pnl_dollar = hedge_size * (cost_spot_price - current_spot_price)
+            pnl_dollar = abs(hedge_size) * (cost_spot_price - current_spot_price)
             pnl = pnl_dollar / current_spot_price
         return pnl
 
     def update_hedge(self, current_spot_price=None):
-        """更新Delta对冲 - 复用calendar_pair逻辑"""
+        """
+        更新Delta对冲 - 复用calendar_pair逻辑
+        """
         if not self.delta_hedge_enabled:
             return 0.0, 0.0
         
@@ -647,9 +662,85 @@ class StraddlePair:
             )
             return self.inverse_perpetual_pnl, self.realized_perpetual_pnl 
         
-        # 需要重新对冲的逻辑（参考calendar_pair的实现）
-        # ... 这里可以完整复制calendar_pair的update_hedge逻辑
+        # 需要重新对冲 - 完整复制calendar_pair逻辑
+        if self.current_delta >= 0 and new_delta >= 0:
+            if new_delta > self.current_delta:
+                more_delta_to_short = new_delta - self.current_delta
+                # 计算新的平均对冲价格（加权平均）
+                numerator = abs(self.current_hedge_delta) * self.average_hedge_spot_price + more_delta_to_short * current_spot_price
+                denominator = abs(self.current_hedge_delta) + more_delta_to_short
+                self.average_hedge_spot_price = numerator / denominator
+                
+                self.current_delta = new_delta
+                self.current_hedge_delta = -self.current_delta
+                self.inverse_perpetual_pnl = self.calculate_hedge_pnl(
+                    cost_spot_price=self.average_hedge_spot_price, 
+                    current_spot_price=current_spot_price, 
+                    hedge_size=self.current_hedge_delta
+                )
+            
+            else:
+                delta_to_remove = self.current_delta - new_delta  # > 0 
+                self.realized_perpetual_pnl += self.calculate_hedge_pnl(
+                    cost_spot_price=self.average_hedge_spot_price, 
+                    current_spot_price=current_spot_price, 
+                    hedge_size=-delta_to_remove
+                )
+                
+                self.current_delta = new_delta 
+                self.current_hedge_delta += delta_to_remove
+
+                if abs(self.current_delta) != 0 or abs(self.current_hedge_delta) != 0:
+                    assert (abs(self.current_delta) == abs(self.current_hedge_delta)
+                            and self.current_delta * self.current_hedge_delta < 0), \
+                            f"Delta对冲不平衡 with self.current_delta: {self.current_delta} and self.current_hedge_delta: {self.current_hedge_delta}"
+
+        elif self.current_delta <= 0 and new_delta <= 0:
+            if new_delta < self.current_delta:
+                more_delta_to_long = self.current_delta - new_delta
+                # 计算新的平均对冲价格（加权平均）
+                numerator = abs(self.current_hedge_delta) * self.average_hedge_spot_price + more_delta_to_long * current_spot_price
+                denominator = abs(self.current_hedge_delta) + more_delta_to_long
+                self.average_hedge_spot_price = numerator / denominator
+                
+                self.current_delta = new_delta
+                self.current_hedge_delta = -self.current_delta
+                self.inverse_perpetual_pnl = self.calculate_hedge_pnl(
+                    cost_spot_price=self.average_hedge_spot_price, 
+                    current_spot_price=current_spot_price, 
+                    hedge_size=self.current_hedge_delta
+                )
+            else:
+                delta_to_remove = new_delta - self.current_delta  # > 0
+                self.realized_perpetual_pnl += self.calculate_hedge_pnl(
+                    cost_spot_price=self.average_hedge_spot_price, 
+                    current_spot_price=current_spot_price, 
+                    hedge_size=delta_to_remove
+                )
+                
+                self.current_delta = new_delta 
+                self.current_hedge_delta -= delta_to_remove
+
+                if abs(self.current_delta) != 0 or abs(self.current_hedge_delta) != 0:
+                    assert (abs(self.current_delta) == abs(self.current_hedge_delta)
+                            and self.current_delta * self.current_hedge_delta < 0), \
+                            f"Delta对冲不平衡 with self.current_delta: {self.current_delta} and self.current_hedge_delta: {self.current_hedge_delta}"
         
+        # 跨象限调整（从正Delta变负Delta或反之）
+        else:
+            # 先平掉原有对冲
+            self.realized_perpetual_pnl += self.calculate_hedge_pnl(
+                cost_spot_price=self.average_hedge_spot_price, 
+                current_spot_price=current_spot_price, 
+                hedge_size=self.current_hedge_delta
+            )
+            
+            # 重新开始新的对冲
+            self.average_hedge_spot_price = current_spot_price
+            self.current_delta = new_delta
+            self.current_hedge_delta = -self.current_delta
+            self.inverse_perpetual_pnl = 0.0  # 新的对冲开始时P&L为0
+
         return self.inverse_perpetual_pnl, self.realized_perpetual_pnl
     
     def should_close(self, current_time, current_spot_price=None, max_loss_pct=0.3, target_profit_pct=0.5, 
@@ -724,9 +815,19 @@ class StraddlePair:
         # 🆕 记录平仓前的对冲信息
         closing_hedge_size = self.current_hedge_delta if self.delta_hedge_enabled else 0
         closing_average_price = self.average_hedge_spot_price if self.delta_hedge_enabled else 0
+
+        # print(f"close reason: {close_reason}")
+        # print(f"current pnl: {self.current_pnl}")
+        # print(f"current options pnl: {self.current_options_pnl}")
+        # print(f"current inverse pnl: {self.inverse_perpetual_pnl}")
+        # print(f"current realized pnl: {self.realized_perpetual_pnl}")
+        # print(f"current inverse total pnl: {self.inverse_perpetual_pnl + self.realized_perpetual_pnl}")
+        # print(f"current hedge size: {self.current_hedge_delta}")
+        # print(f"current average hedge price: {self.average_hedge_spot_price}")
+        # print(f"current spot price: {current_spot_price}")
         
         # 🆕 如果启用Delta对冲，先平掉永续合约
-        if self.delta_hedge_enabled and current_spot_price:
+        if self.delta_hedge_enabled and current_spot_price and "missing_greeks" not in close_reason:
             # 平掉永续合约，实现最终P&L
             final_hedge_pnl = self.calculate_hedge_pnl(
                 cost_spot_price=self.average_hedge_spot_price, 
@@ -735,6 +836,8 @@ class StraddlePair:
             )
             self.realized_perpetual_pnl += final_hedge_pnl
             self.inverse_perpetual_pnl = 0.0
+        
+        # print(f"self.realized_perpetual_pnl: {self.realized_perpetual_pnl}")
         
         # 计算各个合约的盈亏
         if "long" in self.strategy_type:
@@ -751,7 +854,10 @@ class StraddlePair:
             }
         
         # 计算最终总P&L
-        final_total_pnl = self.current_options_pnl + self.realized_perpetual_pnl
+        if self.delta_hedge_enabled:
+            final_total_pnl = self.current_options_pnl + self.realized_perpetual_pnl
+        else:
+            final_total_pnl = self.current_options_pnl
         
         close_info = {
             'entry_time': self.entry_time,
