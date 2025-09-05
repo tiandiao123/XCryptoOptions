@@ -170,7 +170,8 @@ def _find_best_iron_condor(calls, puts, spot_price):
 
 
 class IronPair:
-    def __init__(self, iron_condor, entry_time, entry_spot_price):
+    def __init__(self, iron_condor, entry_time, entry_spot_price,
+                 delta_hedge_enabled=False, delta_threshold=0.05, contract_multiplier=1.0):
         """Iron Condor组合"""
         self.entry_time = entry_time
         self.entry_spot_price = entry_spot_price
@@ -181,11 +182,66 @@ class IronPair:
         self.put_short_price = iron_condor['put_short']['open']
         self.put_long_price = iron_condor['put_long']['open']
         
-        # 希腊字母
+        # 🆕 当前希腊字母
         self.call_short_iv = iron_condor['call_short']['iv']
         self.call_long_iv = iron_condor['call_long']['iv']
         self.put_short_iv = iron_condor['put_short']['iv']
         self.put_long_iv = iron_condor['put_long']['iv']
+        
+        self.call_short_delta = iron_condor['call_short'].get('pa_delta', iron_condor['call_short'].get('delta', 0))
+        self.call_long_delta = iron_condor['call_long'].get('pa_delta', iron_condor['call_long'].get('delta', 0))
+        self.put_short_delta = iron_condor['put_short'].get('pa_delta', iron_condor['put_short'].get('delta', 0))
+        self.put_long_delta = iron_condor['put_long'].get('pa_delta', iron_condor['put_long'].get('delta', 0))
+        
+        self.call_short_gamma = iron_condor['call_short'].get('pa_gamma', iron_condor['call_short'].get('gamma', 0))
+        self.call_long_gamma = iron_condor['call_long'].get('pa_gamma', iron_condor['call_long'].get('gamma', 0))
+        self.put_short_gamma = iron_condor['put_short'].get('pa_gamma', iron_condor['put_short'].get('gamma', 0))
+        self.put_long_gamma = iron_condor['put_long'].get('pa_gamma', iron_condor['put_long'].get('gamma', 0))
+        
+        self.call_short_vega = iron_condor['call_short'].get('pa_vega', iron_condor['call_short'].get('vega', 0))
+        self.call_long_vega = iron_condor['call_long'].get('pa_vega', iron_condor['call_long'].get('vega', 0))
+        self.put_short_vega = iron_condor['put_short'].get('pa_vega', iron_condor['put_short'].get('vega', 0))
+        self.put_long_vega = iron_condor['put_long'].get('pa_vega', iron_condor['put_long'].get('vega', 0))
+        
+        # 🆕 入场时的希腊字母（用于对比）
+        self.entry_greeks = {
+            'call_short': {
+                'price': iron_condor['call_short']['open'],
+                'iv': self.call_short_iv,
+                'delta': self.call_short_delta,
+                'gamma': self.call_short_gamma,
+                'vega': self.call_short_vega
+            },
+            'call_long': {
+                'price': iron_condor['call_long']['open'],
+                'iv': self.call_long_iv,
+                'delta': self.call_long_delta,
+                'gamma': self.call_long_gamma,
+                'vega': self.call_long_vega
+            },
+            'put_short': {
+                'price': iron_condor['put_short']['open'],
+                'iv': self.put_short_iv,
+                'delta': self.put_short_delta,
+                'gamma': self.put_short_gamma,
+                'vega': self.put_short_vega
+            },
+            'put_long': {
+                'price': iron_condor['put_long']['open'],
+                'iv': self.put_long_iv,
+                'delta': self.put_long_delta,
+                'gamma': self.put_long_gamma,
+                'vega': self.put_long_vega
+            }
+        }
+        
+        # 保持向后兼容
+        self.option_entry_prices = {
+            'call_short': iron_condor['call_short']['open'],
+            'call_long': iron_condor['call_long']['open'],
+            'put_short': iron_condor['put_short']['open'],
+            'put_long': iron_condor['put_long']['open']
+        }
         
         # 入场净权利金（我们收取的权利金）
         self.entry_premium = iron_condor['net_premium']
@@ -194,8 +250,9 @@ class IronPair:
         self.max_risk = iron_condor['max_risk']
         self.max_profit = self.entry_premium
         
-        # 盈亏跟踪
+        # 🆕 盈亏跟踪
         self.current_pnl = 0.0
+        self.current_options_pnl = 0.0
         self.is_active = True
         self.last_update_time = entry_time
         
@@ -214,6 +271,21 @@ class IronPair:
             'put_short': iron_condor['put_short']['strike_price'],
             'put_long': iron_condor['put_long']['strike_price']
         }
+        
+        # 🆕 Delta对冲相关配置（Iron Condor通常Delta中性，但可选）
+        self.delta_hedge_enabled = delta_hedge_enabled
+        self.delta_threshold = delta_threshold
+        self.contract_multiplier = contract_multiplier
+        
+        if delta_hedge_enabled:
+            # Delta对冲状态
+            self.average_hedge_spot_price = 0.0
+            self.current_delta = 0.0
+            self.current_hedge_delta = 0.0
+            self.inverse_perpetual_pnl = 0.0
+            self.realized_perpetual_pnl = 0.0
+            self.hedge_transactions = []
+            self.total_hedge_cost = 0.0
     
     def update_pnl(self, current_time, df, current_spot_price, print_info=False):
         """更新Iron Condor的P&L"""
