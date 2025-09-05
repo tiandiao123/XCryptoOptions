@@ -358,8 +358,18 @@ def parse_option_expiry_date(symbol):
 
 
 class CalendarPair:
-    def __init__(self, calendar_spread, entry_time, entry_spot_price):
-        """单向Calendar Spread组合"""
+    def __init__(self, calendar_spread, entry_time, entry_spot_price, 
+                 delta_hedge_enabled=False, delta_threshold=0.05, contract_multiplier=1.0):
+        """
+        单向Calendar Spread组合
+        
+        Args:
+            calendar_spread: calendar spread配置
+            entry_time: 入场时间
+            entry_spot_price: 入场现货价格
+            delta_hedge_enabled: 是否启用Delta对冲（默认False）
+            delta_threshold: Delta对冲触发阈值（默认0.05即5%）
+        """
         self.entry_time = entry_time
         self.entry_spot_price = entry_spot_price
         self.option_type = calendar_spread['long_option']['option_type']
@@ -405,9 +415,12 @@ class CalendarPair:
         # 入场价格 (Long - Short)
         self.entry_premium = (calendar_spread['long_option']['open'] - 
                              calendar_spread['short_option']['open'])
+
+
+        self.current_pnl = 0.0 
         
         # 盈亏跟踪
-        self.current_pnl = 0.0
+        self.current_options_pnl = 0.0
         self.is_active = True
         self.last_update_time = entry_time
         
@@ -420,7 +433,200 @@ class CalendarPair:
         # 存储执行价格用于风险管理
         self.short_strike = calendar_spread['short_option']['strike_price']
         self.long_strike = calendar_spread['long_option']['strike_price']
+
+
+        self.contract_multiplier = contract_multiplier
+
+        # 🆕 Delta对冲相关配置
+        self.delta_hedge_enabled = delta_hedge_enabled
+        self.delta_threshold = delta_threshold
+          
+        
+        
+        self.average_hedge_spot_price = 0.0  # 平均对冲现货价格
+        self.current_delta = 0.0 
+        self.current_hedge_delta = 0.0  # 当前对冲现货价格
+        
+        # 反向永续合约对冲状态
+        self.inverse_perpetual_contracts = 0.0  # 当前持有的反向永续合约数量
+        self.inverse_perpetual_entry_price = 0.0  # 反向永续合约入场价格（USD）
+        self.inverse_perpetual_pnl = 0.0  # 反向永续合约累计盈亏（BTC）
+        self.realized_perpetual_pnl = 0.0  # 已实现盈亏（BTC）
+        
+        
+        # 对冲交易记录
+        self.hedge_transactions = []  # 所有对冲交易的记录
+        self.total_hedge_cost = 0.0  # 累计对冲成本（BTC）
+        
+        
     
+    def initialize_hedge(self, current_time=None, current_spot_price=None, hedge_cost_bps=0.0002, print_info=False):
+        """
+        初始化Delta对冲
+        
+        Args:
+            current_time: 当前时间点
+            current_spot_price: 当前现货价格
+            hedge_cost_bps: 手续费率（基点，默认2bps = 0.0002）
+            print_info: 是否打印详细信息
+            
+        Returns:
+            tuple: (success, hedge_info)
+        """
+        if not self.delta_hedge_enabled:
+            if print_info:
+                print("🔄 Delta对冲未启用，跳过初始对冲")
+            return True, None
+        
+        net_delta = self.get_net_delta()
+        
+        if print_info:
+            print(f"🔄 执行初始Delta对冲:")
+            print(f"   组合净Delta: {net_delta:+.3f}")
+            print(f"   Delta阈值: ±{self.delta_threshold:.3f}")
+        
+        # 检查是否需要对冲
+        if abs(net_delta) < self.delta_threshold:
+            if print_info:
+                print(f"   ✅ Delta在阈值内，无需对冲")
+            return True, None
+        
+        # 初始化对冲参数
+        self.average_hedge_spot_price = current_spot_price
+        self.current_delta = net_delta * self.contract_multiplier
+        self.current_hedge_delta = -self.current_delta  # 反向对冲
+        
+        if print_info:
+            print(f"   📊 初始对冲执行:")
+            print(f"     平均对冲现货价格: ${self.average_hedge_spot_price:,.0f}")
+            print(f"     当前对冲Delta: {self.current_hedge_delta:+.3f}")
+        
+        return True, {'hedge_delta': self.current_hedge_delta, 'hedge_price': self.average_hedge_spot_price}
+    
+
+    def calculate_hedge_pnl(self, cost_spot_price, current_spot_price, hedge_size):
+        """
+        cost_spot_price: 对冲成本现货价格
+        current_spot_price: 当前现货价格
+        hedge_size: 对冲大小 (BTC 计价)
+
+        return pnl (BTC)
+        """
+        if hedge_size > 0:
+            pnl_dollar = hedge_size * (current_spot_price - cost_spot_price)
+            pnl = pnl_dollar / current_spot_price
+        else:
+            pnl_dollar = hedge_size * (cost_spot_price - current_spot_price)
+            pnl = pnl_dollar / current_spot_price
+        return pnl
+
+    def update_hedge(self, current_spot_price=None):
+        """
+        更新Delta对冲
+        """
+        if not self.delta_hedge_enabled:
+            return
+        
+        new_delta = self.get_net_delta()
+        required_delta = -new_delta
+        
+
+        if abs(self.current_delta) != 0 or abs(self.current_hedge_delta) != 0:
+            assert (abs(self.current_delta) == abs(self.current_hedge_delta)
+                    and self.current_delta * self.current_hedge_delta < 0), \
+                    f"Delta对冲不平衡 with self.current_delta: {self.current_delta} and self.current_hedge_delta: {self.current_hedge_delta}"
+
+
+        # no need re_hedge 
+        if abs(required_delta - self.current_hedge_delta) <= self.delta_threshold:
+            self.inverse_perpetual_pnl = self.calculate_hedge_pnl(cost_spot_price=self.average_hedge_spot_price, 
+                                                                      current_spot_price=current_spot_price, 
+                                                                      hedge_size=self.current_hedge_delta)
+
+            return self.inverse_perpetual_pnl, self.realized_perpetual_pnl 
+        
+        # need_to_rehedge due to abs(required_delta - self.current_hedge_delta) > self.delta_threshold
+
+        if self.current_delta >= 0 and new_delta >= 0:
+            if new_delta > self.current_delta:
+                more_delta_to_short = new_delta - self.current_delta
+                # 计算新的平均对冲价格（加权平均）
+                numerator = abs(self.current_hedge_delta) * self.average_hedge_spot_price + more_delta_to_short * current_spot_price
+                denominator = abs(self.current_hedge_delta) + more_delta_to_short
+                self.average_hedge_spot_price = numerator / denominator
+                
+                self.current_delta = new_delta
+                self.current_hedge_delta = -self.current_delta
+                self.inverse_perpetual_pnl = self.calculate_hedge_pnl(
+                    cost_spot_price=self.average_hedge_spot_price, 
+                    current_spot_price=current_spot_price, 
+                    hedge_size=self.current_hedge_delta
+                )
+            
+            else:
+                delta_to_remove = self.current_delta - new_delta  # > 0 
+                self.realized_perpetual_pnl = self.calculate_hedge_pnl(
+                    cost_spot_price=self.average_hedge_spot_price, 
+                    current_spot_price=current_spot_price, 
+                    hedge_size=-delta_to_remove
+                )
+                
+                self.current_delta = new_delta 
+                self.current_hedge_delta += delta_to_remove
+
+                if abs(self.current_delta) != 0 or abs(self.current_hedge_delta) != 0:
+                    assert (abs(self.current_delta) == abs(self.current_hedge_delta)
+                            and self.current_delta * self.current_hedge_delta < 0), \
+                            f"Delta对冲不平衡 with self.current_delta: {self.current_delta} and self.current_hedge_delta: {self.current_hedge_delta}"
+
+        elif self.current_delta <= 0 and new_delta <= 0:
+            if new_delta < self.current_delta:
+                more_delta_to_long = self.current_delta - new_delta
+                # 计算新的平均对冲价格（加权平均）
+                numerator = abs(self.current_hedge_delta) * self.average_hedge_spot_price + more_delta_to_long * current_spot_price
+                denominator = abs(self.current_hedge_delta) + more_delta_to_long
+                self.average_hedge_spot_price = numerator / denominator
+                
+                self.current_delta = new_delta
+                self.current_hedge_delta = -self.current_delta
+                self.inverse_perpetual_pnl = self.calculate_hedge_pnl(
+                    cost_spot_price=self.average_hedge_spot_price, 
+                    current_spot_price=current_spot_price, 
+                    hedge_size=self.current_hedge_delta
+                )
+            else:
+                delta_to_remove = new_delta - self.current_delta  # > 0
+                self.realized_perpetual_pnl = self.calculate_hedge_pnl(
+                    cost_spot_price=self.average_hedge_spot_price, 
+                    current_spot_price=current_spot_price, 
+                    hedge_size=delta_to_remove
+                )
+                
+                self.current_delta = new_delta 
+                self.current_hedge_delta -= delta_to_remove
+
+                if abs(self.current_delta) != 0 or abs(self.current_hedge_delta) != 0:
+                    assert (abs(self.current_delta) == abs(self.current_hedge_delta)
+                            and self.current_delta * self.current_hedge_delta < 0), \
+                            f"Delta对冲不平衡 with self.current_delta: {self.current_delta} and self.current_hedge_delta: {self.current_hedge_delta}"
+        
+        # 跨象限调整（从正Delta变负Delta或反之）
+        else:
+            # 先平掉原有对冲
+            self.realized_perpetual_pnl += self.calculate_hedge_pnl(
+                cost_spot_price=self.average_hedge_spot_price, 
+                current_spot_price=current_spot_price, 
+                hedge_size=self.current_hedge_delta
+            )
+            
+            # 重新开始新的对冲
+            self.average_hedge_spot_price = current_spot_price
+            self.current_delta = new_delta
+            self.current_hedge_delta = -self.current_delta
+            self.inverse_perpetual_pnl = 0.0  # 新的对冲开始时P&L为0
+
+        return self.inverse_perpetual_pnl, self.realized_perpetual_pnl
+        
     def update_greeks(self, current_time, current_df, current_atm_options=None, print_info=False):
         """
         更新希腊字母信息
@@ -575,15 +781,36 @@ class CalendarPair:
         current_premium = self.long_option_price - self.short_option_price
         
         # 计算P&L
-        self.current_pnl = current_premium - self.entry_premium
+        self.current_options_pnl = current_premium - self.entry_premium
         self.last_update_time = current_time
+
+
+        # update hedge pnl 
+        if self.delta_hedge_enabled:
+            self.inverse_perpetual_pnl, self.realized_perpetual_pnl = self.update_hedge(current_spot_price=current_spot_price)
+        else:
+            self.inverse_perpetual_pnl = 0.0
+            self.realized_perpetual_pnl = 0.0
         
+        self.current_pnl = self.current_options_pnl + self.inverse_perpetual_pnl + self.realized_perpetual_pnl
+
         if print_info:
             print(f"📊 Calendar P&L更新 - 时间: {current_time.strftime('%Y-%m-%d %H:%M')}")
             print(f"   策略类型: {self.option_type} Calendar")
             print(f"   入场权利金: {self.entry_premium:.6f} BTC")
             print(f"   当前权利金: {current_premium:.6f} BTC")
-            print(f"   当前P&L: {self.current_pnl:.6f} BTC")
+            print(f"   期权P&L: {self.current_options_pnl:.6f} BTC")
+            # 🆕 添加Delta对冲信息
+            if self.delta_hedge_enabled:
+                print(f"   永续P&L: {self.inverse_perpetual_pnl:.6f} BTC")
+                print(f"   已实现P&L: {self.realized_perpetual_pnl:.6f} BTC")
+                print(f"   总P&L: {self.current_pnl:.6f} BTC")
+                print(f"   对冲合约: {self.current_hedge_delta:+.3f} BTC")
+                print(f"   平均持仓价: ${self.average_hedge_spot_price:,.0f}")  # 🆕 添加平均持仓价
+                if current_spot_price:
+                    print(f"   当前现货价: ${current_spot_price:,.0f}")
+            else:
+                print(f"   总P&L: {self.current_options_pnl:.6f} BTC")
             print(f"   净Delta: {self.get_net_delta():+.3f}")
             if current_spot_price:
                 print(f"   现货价格: ${current_spot_price:,.2f}")
@@ -651,7 +878,7 @@ class CalendarPair:
             'entry_time': self.entry_time,
             'entry_spot_price': self.entry_spot_price,
             'entry_premium': self.entry_premium,
-            'current_pnl': self.current_pnl,
+            'current_options_pnl': self.current_options_pnl,
             'last_update_time': self.last_update_time,
             'option_symbols': self.option_symbols.copy()
         }
@@ -679,7 +906,7 @@ class CalendarPair:
             current_iv_spread = self.get_iv_spread()
             
             # 如果入场时IV价差为正（有利），但现在变为负值，立即平仓
-            if entry_iv_spread > 0 and current_iv_spread < -0.01:
+            if entry_iv_spread > 0 and current_iv_spread < -0.02:
                 return True, f"IV价差反转平仓 (入场: {entry_iv_spread:+.1%} → 当前: {current_iv_spread:+.1%})"
             
             # 🆕 额外检查：如果IV价差大幅收敛（超过80%），也考虑平仓
@@ -691,7 +918,7 @@ class CalendarPair:
         
         # 计算P&L百分比
         if abs(self.entry_premium) > 1e-8:
-            pnl_pct = self.current_pnl / abs(self.entry_premium)
+            pnl_pct = self.current_options_pnl / abs(self.entry_premium)
         else:
             pnl_pct = 0
         
@@ -714,9 +941,9 @@ class CalendarPair:
         
         return False, "持续持有"
     
-    def close(self, close_time=None, close_reason="手动平仓"):
+    def close(self, close_time=None, close_reason="手动平仓", current_spot_price=None):
         """
-        平仓
+        平仓 - 包含Delta对冲平仓
         
         Returns:
             dict: 平仓信息
@@ -724,21 +951,48 @@ class CalendarPair:
         if not self.is_active:
             return None
         
+        # 🆕 记录平仓前的对冲信息
+        closing_hedge_size = self.current_hedge_delta
+        closing_average_price = self.average_hedge_spot_price
+        
+        # 🆕 如果启用Delta对冲，先平掉永续合约
+        if self.delta_hedge_enabled and current_spot_price:
+            # 平掉永续合约，实现最终P&L
+            final_hedge_pnl = self.calculate_hedge_pnl(
+                cost_spot_price=self.average_hedge_spot_price, 
+                current_spot_price=current_spot_price, 
+                hedge_size=self.current_hedge_delta
+            )
+            self.realized_perpetual_pnl += final_hedge_pnl
+            self.inverse_perpetual_pnl = 0.0
+            self.inverse_perpetual_contracts = 0.0
+        
         # 计算各个合约的盈亏
         contract_pnl = {
             'long_option': self.long_option_price - self.option_entry_prices['long_option'],
             'short_option': self.option_entry_prices['short_option'] - self.short_option_price
         }
         
+        # 计算最终总P&L
+        final_total_pnl = self.current_options_pnl + self.realized_perpetual_pnl
+        
         close_info = {
             'entry_time': self.entry_time,
             'close_time': close_time or self.last_update_time,
             'strategy_type': f"{self.option_type}_calendar",
             'entry_premium': self.entry_premium,
-            'final_pnl': self.current_pnl,
+            'final_options_pnl': self.current_options_pnl,
+            'final_hedge_pnl': self.realized_perpetual_pnl if self.delta_hedge_enabled else 0.0,
+            'final_total_pnl': final_total_pnl,
             'close_reason': close_reason,
-            'pnl_pct': self.current_pnl / abs(self.entry_premium) if abs(self.entry_premium) > 1e-8 else 0,
-            'contract_pnl': contract_pnl
+            'pnl_options_pct': self.current_options_pnl / abs(self.entry_premium) if abs(self.entry_premium) > 1e-8 else 0,
+            'pnl_total_pct': final_total_pnl / abs(self.entry_premium) if abs(self.entry_premium) > 1e-8 else 0,
+            'contract_pnl': contract_pnl,
+            'delta_hedge_enabled': self.delta_hedge_enabled,
+            # 🆕 添加对冲平仓信息
+            'closing_hedge_size': closing_hedge_size,
+            'closing_average_price': closing_average_price,
+            'closing_spot_price': current_spot_price
         }
         
         self.is_active = False

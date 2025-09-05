@@ -107,15 +107,157 @@ def should_exclude_trade_pnl(calendar_pair, close_info, current_spot_price, prin
             return True, f"short_iv_change_excessive: {short_iv_change:.1%}"
         
         # 4. 检查P&L是否过度异常（可能是数据错误）
-        if abs(close_info['pnl_pct']) > 5.0:  # P&L超过500%可能是数据问题
+        pnl_pct = close_info.get('pnl_total_pct', close_info.get('pnl_pct', 0))  # 🔧 使用正确的字段名
+        if abs(pnl_pct) > 5.0:  # P&L超过500%可能是数据问题
             if print_info:
-                print(f"⚠️  P&L异常: {close_info['pnl_pct']*100:.1f}%")
-            return True, f"pnl_excessive: {close_info['pnl_pct']*100:.1f}%"
+                print(f"⚠️  P&L异常: {pnl_pct*100:.1f}%")
+            return True, f"pnl_excessive: {pnl_pct*100:.1f}%"
         
         return False, "valid_trade"
         
     except Exception as e:
         return True, f"exception_in_validation: {str(e)}"
+
+
+
+def update_plot(ax, line, time_list, asset_list, init_btc):
+    """更新实时图表"""
+    if not time_list or not asset_list:
+        return
+    
+    # 更新数据
+    line.set_data(time_list, asset_list)
+    
+    # 动态调整坐标轴范围
+    ax.set_xlim(time_list[0], time_list[-1])
+    
+    # Y轴范围：稍微扩展以便观察
+    y_min = min(min(asset_list), init_btc) * 0.95
+    y_max = max(max(asset_list), init_btc) * 1.05
+    ax.set_ylim(y_min, y_max)
+    
+    # 🔧 智能设置X轴时间标签 - 添加年份支持
+    total_points = len(time_list)
+    
+    # 检查时间跨度是否超过一年
+    time_span_days = (time_list[-1] - time_list[0]).days
+    
+    if time_span_days > 365:
+        # 超过一年显示年份
+        time_format = '%Y-%m-%d'
+    elif time_span_days > 60:
+        # 超过两个月显示月-日
+        time_format = '%m-%d %H:%M'
+    else:
+        # 短期显示详细时间
+        time_format = '%m-%d %H:%M'
+    
+    if total_points > 20:
+        if total_points < 100:
+            interval = max(1, total_points // 10)
+        elif total_points < 1000:
+            interval = max(1, total_points // 15)
+        else:
+            interval = max(1, total_points // 20)
+        
+        display_times = time_list[::interval]
+        display_labels = [t.strftime(time_format) for t in display_times]
+        
+        ax.set_xticks(display_times)
+        ax.set_xticklabels(display_labels, rotation=45, ha='right')
+    else:
+        ax.set_xticks(time_list)
+        ax.set_xticklabels([t.strftime(time_format) for t in time_list], rotation=45, ha='right')
+    
+    # 添加当前收益信息到标题
+    if asset_list:
+        current_return = (asset_list[-1] - init_btc) / init_btc * 100
+        # 🆕 在标题中也显示时间范围
+        start_time = time_list[0].strftime('%Y-%m')
+        end_time = time_list[-1].strftime('%Y-%m')
+        ax.set_title(f'Calendar Spread Strategy ({start_time} to {end_time}) - Current Return: {current_return:+.2f}%', 
+                    fontsize=14, fontweight='bold')
+    
+    # 刷新图表
+    ax.figure.canvas.draw()
+    ax.figure.canvas.flush_events()
+    
+
+    plt.tight_layout()
+
+
+def print_opening_position_info(calendar_pair, calendar_spread_options, spot, time_obj, predicted_vol, vol_model, vol_result, iv_1month):
+    """
+    打印开仓持仓的详细信息
+    
+    Args:
+        calendar_pair: CalendarPair对象
+        calendar_spread_options: 选中的calendar spread机会
+        spot: 现货价格
+        time_obj: 时间对象
+        predicted_vol: 预测波动率
+        vol_model: 波动率模型名称
+        vol_result: 完整的波动率结果字典
+        iv_1month: 1月期ATM IV信息
+    """
+    print(f"===============================  📥 开仓新持仓 =================================")
+    print(f"   时间: {time_obj.strftime('%Y-%m-%d %H:%M')}")
+    print(f"   策略: {calendar_spread_options['strategy_type']} ({calendar_spread_options.get('strategy_name', 'Unknown')})")
+    print(f"   期权类型: {calendar_spread_options['option_type']} Calendar")
+    print(f"   现货价格: ${spot:,.2f}")
+    print(f"   入场权利金: {calendar_pair.entry_premium:.6f} BTC")
+    
+    # 波动率对比
+    print(f"\n📊 波动率分析:")
+    if predicted_vol:
+        print(f"   {vol_model}预测波动率: {predicted_vol:.1%}")
+        # 从vol_result中获取EWMA
+        ewma_vol = vol_result.get('ewma_vol_annualized')
+        if vol_model == "GARCH" and ewma_vol:
+            print(f"   EWMA波动率: {ewma_vol:.1%}")
+    else:
+        print(f"   预测波动率: 数据不足")
+    
+    if 'atm_iv_1month' in iv_1month:
+        atm_iv = iv_1month['atm_iv_1month']
+        option_count = iv_1month['option_count']
+        print(f"   1月ATM IV: {atm_iv:.1%} (样本: {option_count})")
+        
+        if predicted_vol:
+            iv_premium = atm_iv - predicted_vol
+            print(f"   IV溢价: {iv_premium:+.1%} ({'高估' if iv_premium > 0 else '低估'})")
+    elif 'error' in iv_1month:
+        print(f"   1月ATM IV: 无可用数据")
+    
+    # 策略IV信息
+    analysis = calendar_spread_options['analysis']
+    print(f"   策略IV: 短期{analysis['short_term_iv']:.1%} vs 长期{analysis['long_term_iv']:.1%} (价差:{analysis['iv_spread']:+.1%})")
+    
+    # 合约信息
+    print(f"\n📋 合约信息:")
+    long_opt = calendar_spread_options['calendar_spread']['long_option']
+    short_opt = calendar_spread_options['calendar_spread']['short_option']
+    print(f"   Long ({analysis['long_term_days']}天): {calendar_pair.long_option_price:.6f} BTC ({long_opt['symbol']})")
+    print(f"   Short ({analysis['short_term_days']}天): {calendar_pair.short_option_price:.6f} BTC ({short_opt['symbol']})")
+    print(f"   执行价格: Long ${long_opt['strike_price']:,.0f} vs Short ${short_opt['strike_price']:,.0f}")
+    
+    # IV和Delta信息
+    print(f"   开仓IV: Long {long_opt['iv']:.1%} vs Short {short_opt['iv']:.1%} (价差: {short_opt['iv'] - long_opt['iv']:+.1%})")
+    print(f"   开仓Delta: Long {long_opt['delta']:.3f} vs Short {short_opt['delta']:.3f} (净Delta: {long_opt['delta'] - short_opt['delta']:+.3f})")
+    
+    # Delta分析
+    net_delta = calendar_pair.get_net_delta()
+    print(f"\n🔄 Delta分析:")
+    print(f"   当前净Delta: {net_delta:+.3f}")
+    if abs(net_delta) > 0.05:
+        print(f"   ⚠️  建议考虑Delta对冲 (|净Delta| = {abs(net_delta):.3f} > 0.05)")
+        # 计算大致的Delta敞口
+        delta_exposure_btc = abs(net_delta)
+        delta_exposure_usd = delta_exposure_btc * spot
+        print(f"   Delta敞口: ~{delta_exposure_btc:.3f} BTC (~${delta_exposure_usd:,.0f})")
+    else:
+        print(f"   ✅ Delta在可接受范围内")
+
 
 
 def log_excluded_trade_details(calendar_pair, close_info, exclude_reason, time_obj, spot, final_pnl, total_asset, log_file_path):
@@ -211,13 +353,49 @@ def log_excluded_trade_details(calendar_pair, close_info, exclude_reason, time_o
         print(f"⚠️  异常交易日志写入失败: {e}")
 
 
+def get_predicted_volatility(vol_tracker, spot_price, time_obj):
+    """
+    获取预测波动率 - 优先GARCH，备用EWMA
+    
+    Args:
+        vol_tracker: 波动率跟踪器
+        spot_price: 现货价格
+        time_obj: 时间对象
+        
+    Returns:
+        tuple: (predicted_vol, vol_model, vol_result)
+    """
+    # 🆕 更新波动率跟踪器
+    vol_result = vol_tracker.add_price(spot_price, time_obj)
+    
+    # 选择可用的波动率预测
+    garch_vol = vol_result.get('garch_vol_annualized')
+    ewma_vol = vol_result.get('ewma_vol_annualized')
+    
+    if garch_vol is not None:
+        predicted_vol = garch_vol
+        vol_model = "GARCH"
+    elif ewma_vol is not None:
+        predicted_vol = ewma_vol
+        vol_model = "EWMA"
+    else:
+        predicted_vol = None
+        vol_model = "无"
+    
+    return predicted_vol, vol_model, vol_result
+
+
 def backtest_calendar_spread(data_folder: str, 
                             init_btc: float = 1.0, 
                             enable_plot: bool = True, 
                             plot_update_interval: int = 500, 
                             save_folder: str = 'calendar_spread_backtest_result',
-                            enable_data_filter: bool = True,
-                            exclude_abnormal_trades: bool = True):  # 🆕 添加异常交易排除开关
+                            exclude_abnormal_trades: bool = True,
+                            # Delta对冲参数
+                            enable_delta_hedge: bool = False,
+                            delta_threshold: float = 0.05,
+                            hedge_cost_bps: float = 0.0002,
+                            inverse_contract_multiplier: float = 1.0):
     """
     Calendar Spread回测 - 增加异常交易排除功能
     """
@@ -262,10 +440,8 @@ def backtest_calendar_spread(data_folder: str,
         plt.tight_layout()
         plt.show(block=False)
     
-    print(f"📊 总文件数: {len(iterator.dates)}")
-    print(f"📅 日期范围: {iterator.dates[0]} 到 {iterator.dates[-1]}")
 
-    start_date = iterator.dates[-int(365 * 2)]
+    start_date = iterator.dates[-int(365 * 2.5)]
     end_date = iterator.dates[-1]
     print(f"回测时间范围: {start_date} 到 {end_date}")
     
@@ -307,26 +483,12 @@ def backtest_calendar_spread(data_folder: str,
 
         unique_dates.add(date)
         
-        # 🆕 更新波动率跟踪器
-        vol_result = vol_tracker.add_price(spot, time_obj)
-        
-        # 选择可用的波动率预测
-        garch_vol = vol_result.get('garch_vol_annualized')
-        ewma_vol = vol_result.get('ewma_vol_annualized')
-        
-        if garch_vol is not None:
-            predicted_vol = garch_vol
-            vol_model = "GARCH"
-        elif ewma_vol is not None:
-            predicted_vol = ewma_vol
-            vol_model = "EWMA"
-        else:
-            predicted_vol = None
-            vol_model = "无"
+        # 🆕 获取预测波动率
+        predicted_vol, vol_model, vol_result = get_predicted_volatility(vol_tracker, spot, time_obj)
         
         # 🆕 计算1个月ATM IV
         iv_1month = calculate_atm_iv_1month(atm_options)
-
+        
         # 检查Calendar Spread机会
         if has_opened_position is False:
             calendar_spread_options = find_atm_calendar_pair(atm_options)
@@ -339,53 +501,32 @@ def backtest_calendar_spread(data_folder: str,
                 calendar_pair = CalendarPair(
                     calendar_spread_options['calendar_spread'], 
                     time_obj, 
-                    spot
+                    spot,
+                    delta_hedge_enabled=enable_delta_hedge,
+                    delta_threshold=delta_threshold,
+                    contract_multiplier=inverse_contract_multiplier  # 🆕 添加合约乘数
                 )
                 
-                print(f"===============================  📥 开仓新持仓 =================================")
-                print(f"   时间: {time_obj.strftime('%Y-%m-%d %H:%M')}")
-                print(f"   策略: {calendar_spread_options['strategy_type']} ({calendar_spread_options.get('strategy_name', 'Unknown')})")
-                print(f"   期权类型: {calendar_spread_options['option_type']} Calendar")
-                print(f"   现货价格: ${spot:,.2f}")
-                print(f"   入场权利金: {calendar_pair.entry_premium:.6f} BTC")
+                # 🆕 初始化Delta对冲
+                if enable_delta_hedge:
+                    hedge_success, hedge_info = calendar_pair.initialize_hedge(
+                        current_time=time_obj,
+                        current_spot_price=spot,
+                        hedge_cost_bps=hedge_cost_bps,
+                        print_info=True
+                    )
                 
-                # 🆕 波动率对比
-                print(f"\n📊 波动率分析:")
-                if predicted_vol:
-                    print(f"   {vol_model}预测波动率: {predicted_vol:.1%}")
-                    if vol_model == "GARCH" and ewma_vol:
-                        print(f"   EWMA波动率: {ewma_vol:.1%}")
-                else:
-                    print(f"   预测波动率: 数据不足")
-                
-                if 'atm_iv_1month' in iv_1month:
-                    atm_iv = iv_1month['atm_iv_1month']
-                    option_count = iv_1month['option_count']
-                    print(f"   1月ATM IV: {atm_iv:.1%} (样本: {option_count})")
-                    
-                    if predicted_vol:
-                        iv_premium = atm_iv - predicted_vol
-                        print(f"   IV溢价: {iv_premium:+.1%} ({'高估' if iv_premium > 0 else '低估'})")
-                elif 'error' in iv_1month:
-                    print(f"   1月ATM IV: 无可用数据")
-                
-                # 策略IV信息
-                analysis = calendar_spread_options['analysis']
-                print(f"   策略IV: 短期{analysis['short_term_iv']:.1%} vs 长期{analysis['long_term_iv']:.1%} (价差:{analysis['iv_spread']:+.1%})")
-                
-                # 合约信息
-                print(f"\n📋 合约信息:")
-                long_opt = calendar_spread_options['calendar_spread']['long_option']
-                short_opt = calendar_spread_options['calendar_spread']['short_option']
-                print(f"   Long ({analysis['long_term_days']}天): {calendar_pair.long_option_price:.6f} BTC ({long_opt['symbol']})")
-                print(f"   Short ({analysis['short_term_days']}天): {calendar_pair.short_option_price:.6f} BTC ({short_opt['symbol']})")
-                print(f"   执行价格: Long ${long_opt['strike_price']:,.0f} vs Short ${short_opt['strike_price']:,.0f}")
-                # 🆕 添加IV信息
-                print(f"   开仓IV: Long {long_opt['iv']:.1%} vs Short {short_opt['iv']:.1%} (价差: {short_opt['iv'] - long_opt['iv']:+.1%})")
-                # 🆕 添加Delta信息
-                print(f"   开仓Delta: Long {long_opt['delta']:.3f} vs Short {short_opt['delta']:.3f} (净Delta: {long_opt['delta'] - short_opt['delta']:+.3f})")
-
-
+                # 🔧 替换原来的所有打印代码为一个函数调用
+                print_opening_position_info(
+                    calendar_pair, 
+                    calendar_spread_options, 
+                    spot, 
+                    time_obj, 
+                    predicted_vol, 
+                    vol_model, 
+                    vol_result, 
+                    iv_1month
+                )
         else:
             # 🆕 更新持仓P&L（现在包含希腊字母更新）
             update_success, failure_reason = calendar_pair.update_pnl(
@@ -405,6 +546,11 @@ def backtest_calendar_spread(data_folder: str,
                 print(f"   净Delta: {greeks_summary['net_delta']:+.3f} (变化: {greeks_change['delta_change']['net']:+.3f})")
                 print(f"   IV价差: {greeks_summary['iv_spread']:+.1%} (变化: {greeks_change['iv_change']['spread']:+.1%})")
                 print(f"   当前P&L: {calendar_pair.current_pnl:+.6f} BTC")
+                # 🆕 添加对冲监控信息
+                if calendar_pair.delta_hedge_enabled and calendar_pair.current_hedge_delta != 0:
+                    print(f"   对冲头寸: {calendar_pair.current_hedge_delta:+.3f} BTC")
+                    print(f"   平均持仓价: ${calendar_pair.average_hedge_spot_price:,.0f}")
+                    print(f"   当前现货价: ${spot:,.0f}")
             
             if update_success:
                 should_close, reason = calendar_pair.should_close(time_obj, spot, iv_reversal_close=True)
@@ -441,8 +587,10 @@ def backtest_calendar_spread(data_folder: str,
                 
                 # 保存P&L并平仓
                 final_pnl = calendar_pair.current_pnl
-                close_info = calendar_pair.close(time_obj, reason)
+                close_info = calendar_pair.close(time_obj, reason, current_spot_price=spot)  # 🔧 添加现货价格
                 
+
+
                 # 🆕 检查是否应该排除这次交易
                 should_exclude, exclude_reason = should_exclude_trade_pnl(
                     calendar_pair, close_info, spot, print_info=exclude_abnormal_trades
@@ -474,11 +622,8 @@ def backtest_calendar_spread(data_folder: str,
                     print(f"\n📤 平仓: {reason}")
                     print(f"   时间: {time_obj.strftime('%Y-%m-%d %H:%M')}")
                     print(f"   策略类型: {close_info['strategy_type']}")
-                    print(f"   P&L: {final_pnl:.6f} BTC")
-                    print(f"   收益率: {close_info['pnl_pct']:.2%}")
-                    print(f"   总资产: {total_asset:.6f} BTC")
-                    print(f"   现货价格: ${spot:,.0f}")
-                    
+                    print(f"   期权P&L: {close_info.get('final_options_pnl', close_info.get('final_pnl', 0)):.6f} BTC")
+
                     # 期权价格信息
                     print(f"   Long: {calendar_pair.long_option_price:.6f} BTC ({calendar_pair.option_symbols['long_option']})")
                     print(f"   Short: {calendar_pair.short_option_price:.6f} BTC ({calendar_pair.option_symbols['short_option']})")
@@ -490,11 +635,23 @@ def backtest_calendar_spread(data_folder: str,
                         print(f"   平仓Delta: Long {long_current['delta']:.3f} vs Short {short_current['delta']:.3f} (净Delta: {long_current['delta'] - short_current['delta']:+.3f})")
                     else:
                         print(f"   ⚠️  无法获取平仓时希腊字母信息")
-
                     # 各合约P&L
                     if 'contract_pnl' in close_info:
                         contract_pnl = close_info['contract_pnl']
-                        print(f"   合约P&L: Long:{contract_pnl['long_option']:+.6f} Short:{contract_pnl['short_option']:+.6f}")
+                        print(f"   期权合约P&L: Long:{contract_pnl['long_option']:+.6f} Short:{contract_pnl['short_option']:+.6f}")
+                    # 🆕 添加Delta对冲P&L信息
+                    if calendar_pair.delta_hedge_enabled:
+                        print(f"   永续浮动P&L: {calendar_pair.inverse_perpetual_pnl:.6f} BTC")
+                        print(f"   已实现永续合约P&L: {calendar_pair.realized_perpetual_pnl:.6f} BTC")
+                        print(f"   总P&L: {final_pnl:.6f} BTC")
+                        print(f"   平均持仓价: ${close_info.get('closing_average_price', 0):,.0f}")
+                        print(f"   平仓现货价: ${close_info.get('closing_spot_price', 0):,.0f}")
+
+                    else:
+                        print(f"   总P&L: {final_pnl:.6f} BTC")
+
+                    print(f"   总资产: {total_asset:.6f} BTC")
+                    print(f"   现货价格: ${spot:,.0f}")
                     
                     calendar_pair = None
 
@@ -582,7 +739,7 @@ def backtest_calendar_spread(data_folder: str,
     
 
     print(f"\n📊 性能指标:")
-    metrics = calculate_performance_metrics(time_list, sum_asset_pnl_list, init_btc)
+    metrics = calculate_performance_metrics(time_list, sum_asset_pnl_list, init_btc, save_folder=save_folder)
     if metrics:
         print(f"   年化收益率: {metrics['annualized_return']*100:+.2f}%")
         print(f"   年化波动率: {metrics['annualized_volatility']*100:.2f}%") 
@@ -591,93 +748,23 @@ def backtest_calendar_spread(data_folder: str,
         print(f"   最大回撤: {metrics['max_drawdown']*100:.2f}%")
         print(f"   Calmar比率: {metrics['calmar_ratio']:.3f}")
         print(f"   日胜率: {metrics['win_rate']*100:.1f}%")
-    
-    return {
-        'time_list': time_list,
-        'asset_pnl_list': sum_asset_pnl_list,
-        'total_return': final_return,
-        'opportunities_found': opportunities_found
-    }
-
-
-def update_plot(ax, line, time_list, asset_list, init_btc):
-    """更新实时图表"""
-    if not time_list or not asset_list:
-        return
-    
-    # 更新数据
-    line.set_data(time_list, asset_list)
-    
-    # 动态调整坐标轴范围
-    ax.set_xlim(time_list[0], time_list[-1])
-    
-    # Y轴范围：稍微扩展以便观察
-    y_min = min(min(asset_list), init_btc) * 0.95
-    y_max = max(max(asset_list), init_btc) * 1.05
-    ax.set_ylim(y_min, y_max)
-    
-    # 🔧 智能设置X轴时间标签 - 添加年份支持
-    total_points = len(time_list)
-    
-    # 检查时间跨度是否超过一年
-    time_span_days = (time_list[-1] - time_list[0]).days
-    
-    if time_span_days > 365:
-        # 超过一年显示年份
-        time_format = '%Y-%m-%d'
-    elif time_span_days > 60:
-        # 超过两个月显示月-日
-        time_format = '%m-%d %H:%M'
-    else:
-        # 短期显示详细时间
-        time_format = '%m-%d %H:%M'
-    
-    if total_points > 20:
-        if total_points < 100:
-            interval = max(1, total_points // 10)
-        elif total_points < 1000:
-            interval = max(1, total_points // 15)
-        else:
-            interval = max(1, total_points // 20)
-        
-        display_times = time_list[::interval]
-        display_labels = [t.strftime(time_format) for t in display_times]
-        
-        ax.set_xticks(display_times)
-        ax.set_xticklabels(display_labels, rotation=45, ha='right')
-    else:
-        ax.set_xticks(time_list)
-        ax.set_xticklabels([t.strftime(time_format) for t in time_list], rotation=45, ha='right')
-    
-    # 添加当前收益信息到标题
-    if asset_list:
-        current_return = (asset_list[-1] - init_btc) / init_btc * 100
-        # 🆕 在标题中也显示时间范围
-        start_time = time_list[0].strftime('%Y-%m')
-        end_time = time_list[-1].strftime('%Y-%m')
-        ax.set_title(f'Calendar Spread Strategy ({start_time} to {end_time}) - Current Return: {current_return:+.2f}%', 
-                    fontsize=14, fontweight='bold')
-    
-    # 刷新图表
-    ax.figure.canvas.draw()
-    ax.figure.canvas.flush_events()
-    
-
-    plt.tight_layout()
-
-
 
 if __name__ == "__main__":
     data_folder = '/home/ubuntu/options_trading/data/okx_data_processor/options_geeks/fixed_options_with_iv_greeks'
     
     # 🚀 运行Calendar Spread回测
-    results = backtest_calendar_spread(
+    backtest_calendar_spread(
         data_folder=data_folder, 
         init_btc=1.0,
         enable_plot=True,
         plot_update_interval=500,
-        enable_data_filter=True,
-        exclude_abnormal_trades=True  # 🆕 启用异常交易排除
+        exclude_abnormal_trades=True,
+        save_folder='delta_hedge_calendar_spread_backtest_2',
+        # 🆕 Delta对冲参数
+        enable_delta_hedge=True,  # 启用Delta对冲
+        delta_threshold=0.05,     # 5% Delta阈值
+        hedge_cost_bps=0.0000,   # 2bps手续费
+        inverse_contract_multiplier=1.0
     )
 
 
