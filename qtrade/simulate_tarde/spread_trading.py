@@ -494,6 +494,7 @@ def backtest_strategy(data_folder: str,
     total_asset = init_btc
     has_opened_position = False
     calendar_pair = None
+    straddle_pair = None
 
     sum_asset_pnl = total_asset
     sum_asset_pnl_list = []
@@ -516,7 +517,7 @@ def backtest_strategy(data_folder: str,
         plt.show(block=False)
     
 
-    start_date = iterator.dates[-int(365 * 2.5)]
+    start_date = iterator.dates[-int(365 * 3)]
     end_date = iterator.dates[-1]
     print(f"回测时间范围: {start_date} 到 {end_date}")
     
@@ -619,7 +620,61 @@ def backtest_strategy(data_folder: str,
                 iv_threshold_pct=0.05
             )
         elif strategy_name == "gamma_scalping_sell_calendar_spread":
-            pass
+            if straddle_pair is None:
+                (has_opened_position, calendar_pair, opportunities_found, 
+                unique_dates_with_opportunities, total_asset, sum_asset_pnl) = process_calendar_trading_position(
+                    has_opened_position=has_opened_position,
+                    calendar_pair=calendar_pair,
+                    atm_options=atm_options,
+                    time_point_data=time_point_data,
+                    time_obj=time_obj,
+                    spot=spot,
+                    date=date,
+                    predicted_vol=predicted_vol,
+                    vol_model=vol_model,
+                    vol_result=vol_result,
+                    iv_1month=iv_1month,
+                    processed_count=processed_count,
+                    opportunities_found=opportunities_found,
+                    unique_dates_with_opportunities=unique_dates_with_opportunities,
+                    total_asset=total_asset,
+                    trade_quality_stats=trade_quality_stats,
+                    excluded_log_file=excluded_log_file,
+                    enable_delta_hedge=enable_delta_hedge,
+                    delta_threshold=delta_threshold,
+                    inverse_contract_multiplier=inverse_contract_multiplier,
+                    hedge_cost_bps=hedge_cost_bps,
+                    exclude_abnormal_trades=exclude_abnormal_trades
+                )
+            
+            if calendar_pair is None:
+                (has_opened_position, straddle_pair, opportunities_found, 
+                    unique_dates_with_opportunities, total_asset, sum_asset_pnl) = process_straddle_trading_position(
+                        has_opened_position=has_opened_position,
+                        straddle_pair=straddle_pair if 'straddle_pair' in locals() else None,
+                        atm_options=atm_options,
+                        time_point_data=time_point_data,
+                        time_obj=time_obj,
+                        spot=spot,
+                        date=date,
+                        predicted_vol=predicted_vol,
+                        vol_model=vol_model,
+                        vol_result=vol_result,
+                        iv_1month=iv_1month,
+                        processed_count=processed_count,
+                        opportunities_found=opportunities_found,
+                        unique_dates_with_opportunities=unique_dates_with_opportunities,
+                        total_asset=total_asset,
+                        trade_quality_stats=trade_quality_stats,
+                        excluded_log_file=excluded_log_file,
+                        enable_delta_hedge=enable_delta_hedge,
+                        delta_threshold=delta_threshold,
+                        inverse_contract_multiplier=inverse_contract_multiplier,
+                        hedge_cost_bps=hedge_cost_bps,
+                        exclude_abnormal_trades=exclude_abnormal_trades,
+                        iv_threshold_pct=0.05
+                    )
+
         else:
             raise ValueError(f"策略名称 {strategy_name} 不在策略集合中")
 
@@ -687,7 +742,7 @@ if __name__ == "__main__":
         "gamma_scalping_sell_calendar_spread",
     ])
 
-    strategy_name = "calendar_spread"
+    strategy_name = "gamma_scalping_sell_calendar_spread"
 
     assert strategy_name in strategy_set, f"策略名称 {strategy_name} 不在策略集合中"
     
@@ -698,9 +753,9 @@ if __name__ == "__main__":
         enable_plot=True,
         plot_update_interval=500,
         exclude_abnormal_trades=True,
-        save_folder='calendar_spread_backtest',
+        save_folder='delta_hedge_calendar_spread_sell_straddle_backtest_22_25',
         # 🆕 Delta对冲参数
-        enable_delta_hedge=False,  # 启用Delta对冲
+        enable_delta_hedge=True,  # 启用Delta对冲
         delta_threshold=0.05,     # 5% Delta阈值
         hedge_cost_bps=0.0000,   # 2bps手续费
         inverse_contract_multiplier=1.0, 
