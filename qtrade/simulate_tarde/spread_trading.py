@@ -297,7 +297,7 @@ def process_straddle_trading_position(
     
     # 检查Sell Straddle机会
     if not has_opened_position:
-        straddle_opportunity = find_sell_straddle_opportunity(atm_options, predicted_vol, iv_threshold_pct)
+        straddle_opportunity = find_sell_straddle_opportunity(atm_options, predicted_vol, iv_threshold_pct, spot)
         
 
         if straddle_opportunity:

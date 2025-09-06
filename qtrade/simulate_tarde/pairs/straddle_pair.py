@@ -37,14 +37,15 @@ def find_straddle_opportunity(atm_options, realized_vol=None, iv_threshold_pct=0
     return None
 
 
-def find_sell_straddle_opportunity(atm_options, realized_vol=None, iv_threshold_pct=0.05):
+def find_sell_straddle_opportunity(atm_options, realized_vol=None, iv_threshold_pct=0.05, spot_price=None):
     """
-    寻找Short Straddle机会 - 7-14天期权，IV高估时卖出
+    寻找Short Straddle机会 - 7-20天期权，IV高估时卖出，执行价格在现货价格±1%范围内
     
     Args:
         atm_options: ATM期权列表
         realized_vol: 已实现波动率（年化）
         iv_threshold_pct: IV高于RV的阈值（默认5%）
+        spot_price: 现货价格（用于ATM筛选，可选）
         
     Returns:
         dict or None: Short Straddle配置
@@ -52,10 +53,24 @@ def find_sell_straddle_opportunity(atm_options, realized_vol=None, iv_threshold_
     if not atm_options or realized_vol is None:
         return None
     
-    # 筛选7-14天期权
+    # 🆕 获取现货价格
+    if spot_price is None and atm_options:
+        # 从第一个期权中获取现货价格
+        spot_price = atm_options[0].get('spot_open', atm_options[0].get('spot_price', None))
+    
+    if spot_price is None:
+        return None
+    
+    # 🆕 计算±1%价格范围
+    price_tolerance = 0.01  # 1%
+    min_strike = spot_price * (1 - price_tolerance)
+    max_strike = spot_price * (1 + price_tolerance)
+    
+    # 🔧 修改：筛选7-20天期权，且执行价格在现货价格±1%范围内
     short_term_options = [
         opt for opt in atm_options 
-        if 7 <= opt['days_to_expiry'] <= 20
+        if (7 <= opt['days_to_expiry'] <= 20 and 
+            min_strike <= opt['strike_price'] <= max_strike)  # 🆕 添加价格范围限制
     ]
     
     if not short_term_options:
@@ -81,6 +96,7 @@ def find_sell_straddle_opportunity(atm_options, realized_vol=None, iv_threshold_
     if iv_premium < iv_threshold_pct:
         return None  # IV溢价不够，不适合卖出
     
+    # 第84-92行：修改返回字典，添加新的信息字段
     return {
         'straddle': best_straddle,
         'strategy_type': 'short_straddle',
@@ -88,7 +104,10 @@ def find_sell_straddle_opportunity(atm_options, realized_vol=None, iv_threshold_
         'avg_iv': avg_iv,
         'realized_vol': realized_vol,
         'days_to_expiry': best_straddle['call_option']['days_to_expiry'],
-        'iv_condition_met': True
+        'iv_condition_met': True,
+        'spot_price': spot_price,  # 🆕 添加现货价格信息
+        'strike_range': f"${min_strike:.0f}-${max_strike:.0f}",  # 🆕 添加价格范围信息
+        'selected_strike': best_straddle['call_option']['strike_price']  # 🆕 添加选中的执行价格
     }
 
 
