@@ -522,7 +522,7 @@ class StraddlePair:
             self.current_options_pnl = self.entry_premium - current_premium
 
             
-        self.last_update_time = current_time
+            self.last_update_time = current_time
         
         # 🆕 更新Delta对冲P&L（如果启用）
         if self.delta_hedge_enabled and current_spot_price:
@@ -532,20 +532,9 @@ class StraddlePair:
             self.inverse_perpetual_pnl = 0.0
             self.realized_perpetual_pnl = 0.0
         
-        # print("updating PNL ")
-        # print(f"self.current_options_pnl: {self.current_options_pnl}")
-        # print(f"self.entry_premium: {self.entry_premium}")
-        # print(f"current_premium: {current_premium}")
-        # print(f"self.current_options_pnl: {self.current_options_pnl}")
-        # print(f"self.inverse_perpetual_pnl: {self.inverse_perpetual_pnl}")
-        # print(f"self.realized_perpetual_pnl: {self.realized_perpetual_pnl}")
-        # print(f"current hedge size {self.current_hedge_delta} with average hedge price {self.average_hedge_spot_price} and current spot price {current_spot_price}")
-        # print(f"current inverse total pnl: {self.inverse_perpetual_pnl + self.realized_perpetual_pnl}")
         self.current_pnl = self.current_options_pnl + self.inverse_perpetual_pnl + self.realized_perpetual_pnl
-        # print(f"self.current_pnl: {self.current_pnl} \n")
 
-
-
+            
         if print_info:
             print(f"📊 Straddle P&L更新 - 时间: {current_time.strftime('%Y-%m-%d %H:%M')}")
             print(f"   策略类型: {self.strategy_type.replace('_', ' ').title()}")
@@ -553,7 +542,8 @@ class StraddlePair:
             print(f"   入场权利金: {self.entry_premium:.6f} BTC")
             print(f"   当前权利金: {current_premium:.6f} BTC")
             print(f"   期权P&L: {self.current_options_pnl:.6f} BTC")
-            
+
+        
             # 🆕 添加Delta对冲信息
             if self.delta_hedge_enabled:
                 print(f"   永续P&L: {self.inverse_perpetual_pnl:.6f} BTC")
@@ -569,7 +559,7 @@ class StraddlePair:
             print(f"   Call价格: {self.call_price:.6f} BTC (IV: {self.call_iv:.1%})")
             print(f"   Put价格: {self.put_price:.6f} BTC (IV: {self.put_iv:.1%})")
             print(f"   净Delta: {self.get_net_delta():+.3f}")
-            
+                
             if current_spot_price:
                 print(f"   现货价格: ${current_spot_price:,.2f}")
                 print(f"   价格变化: {(current_spot_price - self.entry_spot_price) / self.entry_spot_price * 100:+.2f}%")
@@ -577,7 +567,7 @@ class StraddlePair:
                 print(f"   Moneyness: {moneyness:.3f}")
         
         return True, "success"
-    
+            
     def get_net_delta(self):
         """获取组合净Delta"""
         if "long" in self.strategy_type:
@@ -762,8 +752,15 @@ class StraddlePair:
 
         return self.inverse_perpetual_pnl, self.realized_perpetual_pnl
     
-    def should_close(self, current_time, current_spot_price=None, max_loss_pct=0.3, target_profit_pct=0.5, 
-                     price_threshold_pct=0.15, iv_reversal_close=True):
+    def should_close(self, 
+                    current_time, 
+                    current_spot_price=None, 
+                    max_loss_pct=0.3, 
+                    target_profit_pct=0.5, 
+                    price_threshold_pct=0.15, 
+                    iv_reversal_close=True, 
+                    max_delta_threshold=0.3, 
+                    inti_BTC = 1.0):
         """
         Straddle平仓条件检查 - 增强版本
         """
@@ -793,6 +790,18 @@ class StraddlePair:
         # 止盈条件
         if pnl_pct > target_profit_pct:
             return True, f"止盈 (P&L: {pnl_pct*100:.1f}%)"
+
+        
+        # 🆕 Delta风险控制 - 净Delta过大时强制平仓
+        current_net_delta = self.get_net_delta()
+        if abs(current_net_delta) > max_delta_threshold * inti_BTC:
+            if abs(self.current_hedge_delta) > 1:
+                print(f"Delta风险过大强制平仓 (净Delta: {current_net_delta:+.3f} BTC > ±{max_delta_threshold:.1f})")
+                print(f"self.current_hedge_delta: {self.current_hedge_delta}")
+                print(f"call option delta: {self.call_delta}")
+                print(f"put option delta: {self.put_delta}")
+                exit(0)
+            return True, f"Delta风险过大强制平仓 (净Delta: {current_net_delta:+.3f} BTC > ±{max_delta_threshold:.1f})"
         
         # Straddle特有的平仓条件
         if current_spot_price is not None:
@@ -834,16 +843,6 @@ class StraddlePair:
         # 🆕 记录平仓前的对冲信息
         closing_hedge_size = self.current_hedge_delta if self.delta_hedge_enabled else 0
         closing_average_price = self.average_hedge_spot_price if self.delta_hedge_enabled else 0
-
-        # print(f"close reason: {close_reason}")
-        # print(f"current pnl: {self.current_pnl}")
-        # print(f"current options pnl: {self.current_options_pnl}")
-        # print(f"current inverse pnl: {self.inverse_perpetual_pnl}")
-        # print(f"current realized pnl: {self.realized_perpetual_pnl}")
-        # print(f"current inverse total pnl: {self.inverse_perpetual_pnl + self.realized_perpetual_pnl}")
-        # print(f"current hedge size: {self.current_hedge_delta}")
-        # print(f"current average hedge price: {self.average_hedge_spot_price}")
-        # print(f"current spot price: {current_spot_price}")
         
         # 🆕 如果启用Delta对冲，先平掉永续合约
         if self.delta_hedge_enabled and current_spot_price and "missing_greeks" not in close_reason:

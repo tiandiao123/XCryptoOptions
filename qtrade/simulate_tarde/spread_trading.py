@@ -12,7 +12,7 @@ from tqdm import tqdm
 from qtrade.data_loader import ATMOptionsIterator
 from qtrade.simulate_tarde.vol_tracker.vol_tracker import VolTracker
 from qtrade.data_utils import get_option_full_info
-from qtrade.simulate_tarde.trading_utils import print_final_backtest_report
+from qtrade.simulate_tarde.trading_utils import print_final_backtest_report, print_hedge_stats
 
 from qtrade.simulate_tarde.pairs.calendar_pair import CalendarPair, find_atm_calendar_pair
 from qtrade.simulate_tarde.calendar_helper import (
@@ -85,6 +85,8 @@ def process_calendar_trading_position(
     total_asset,
     trade_quality_stats,
     excluded_log_file,
+    hedge_stats,  # 🆕 添加对冲统计
+    contract_performance_stats,  # 🆕 添加合约胜率统计
     # 配置参数
     enable_delta_hedge=False,
     delta_threshold=0.05,
@@ -119,6 +121,12 @@ def process_calendar_trading_position(
                 delta_threshold=delta_threshold,
                 contract_multiplier=inverse_contract_multiplier
             )
+
+            calendar_pair.temp_hedge_stats = {
+                'hedge_sizes': [],
+                'total_hedge_operations': 0,
+                'hedge_enabled_trades': 0
+            }
             
             # 初始化Delta对冲
             if enable_delta_hedge:
@@ -128,6 +136,20 @@ def process_calendar_trading_position(
                     hedge_cost_bps=hedge_cost_bps,
                     print_info=True
                 )
+                
+                # 🆕 收集对冲统计数据
+                if hedge_success and hedge_info:
+
+                    hedge_size = abs(hedge_info.get('hedge_delta', 0))
+    
+                    # 数据验证
+                    if abs(calendar_pair.get_net_delta()) > 10:
+                        print(f"⚠️ 检测到异常 Delta 值: {calendar_pair.get_net_delta()}")
+                    else:
+                        if hedge_size > 0:
+                            calendar_pair.temp_hedge_stats['hedge_sizes'].append(hedge_size)
+                            calendar_pair.temp_hedge_stats['total_hedge_operations'] += 1
+                        calendar_pair.temp_hedge_stats['hedge_enabled_trades'] += 1
             
             # 打印开仓信息
             print_opening_position_info(
@@ -149,6 +171,15 @@ def process_calendar_trading_position(
             atm_options,
             print_info=False
         )
+
+
+        # 🆕 在update_pnl后收集对冲统计
+        if enable_delta_hedge and calendar_pair.delta_hedge_enabled and update_success:
+            current_hedge_size = abs(calendar_pair.current_hedge_delta)
+
+            if current_hedge_size > 0:
+                calendar_pair.temp_hedge_stats['hedge_sizes'].append(current_hedge_size)
+                calendar_pair.temp_hedge_stats['total_hedge_operations'] += 1
         
         # 每100个时间点显示一次希腊字母变化
         if processed_count % 100 == 0 and update_success:
@@ -230,6 +261,33 @@ def process_calendar_trading_position(
                 total_asset += final_pnl
                 sum_asset_pnl = total_asset
                 
+
+                # 🆕 累加临时统计到全局统计
+                if hasattr(calendar_pair, 'temp_hedge_stats'):
+                    hedge_stats['hedge_sizes'].extend(calendar_pair.temp_hedge_stats['hedge_sizes'])
+                    hedge_stats['total_hedge_operations'] += calendar_pair.temp_hedge_stats['total_hedge_operations']
+                    hedge_stats['hedge_enabled_trades'] += calendar_pair.temp_hedge_stats['hedge_enabled_trades']
+                    
+                    # 更新最大最小值
+                    if calendar_pair.temp_hedge_stats['hedge_sizes']:
+                        hedge_stats['max_hedge_size'] = max(hedge_stats['max_hedge_size'], max(calendar_pair.temp_hedge_stats['hedge_sizes']))
+                        if hedge_stats['min_hedge_size'] == float('inf'):
+                            hedge_stats['min_hedge_size'] = min(calendar_pair.temp_hedge_stats['hedge_sizes'])
+                        else:
+                            hedge_stats['min_hedge_size'] = min(hedge_stats['min_hedge_size'], min(calendar_pair.temp_hedge_stats['hedge_sizes']))
+
+                # 🆕 收集合约胜率统计
+                contract_performance_stats['total_contracts'] += 1
+                contract_performance_stats['contract_pnls'].append(final_pnl)
+                contract_performance_stats['total_pnl_sum'] += final_pnl
+
+                if final_pnl > 0:
+                    contract_performance_stats['profitable_contracts'] += 1
+                    contract_performance_stats['profitable_pnl_sum'] += final_pnl
+                else:
+                    contract_performance_stats['losing_pnl_sum'] += final_pnl
+                
+                
                 # 使用函数打印平仓信息
                 print_closing_position_info(
                     calendar_pair=calendar_pair,
@@ -250,7 +308,6 @@ def process_calendar_trading_position(
 
     return (has_opened_position, calendar_pair, opportunities_found, 
             unique_dates_with_opportunities, total_asset, sum_asset_pnl)
-
 
 
 # 添加到 qtrade/simulate_tarde/spread_trading.py
@@ -276,6 +333,8 @@ def process_straddle_trading_position(
     total_asset,
     trade_quality_stats,
     excluded_log_file,
+    hedge_stats,  # 🆕 添加对冲统计
+    contract_performance_stats,  # 🆕 添加合约胜率统计
     # 配置参数
     enable_delta_hedge=False,
     delta_threshold=0.05,
@@ -320,6 +379,12 @@ def process_straddle_trading_position(
                 delta_threshold=delta_threshold,
                 contract_multiplier=inverse_contract_multiplier
             )
+
+            straddle_pair.temp_hedge_stats = {
+                'hedge_sizes': [],
+                'total_hedge_operations': 0,
+                'hedge_enabled_trades': 0
+            }
             
             # 初始化Delta对冲
             if enable_delta_hedge:
@@ -329,6 +394,15 @@ def process_straddle_trading_position(
                     hedge_cost_bps=hedge_cost_bps,
                     print_info=True
                 )
+                
+                # 🆕 收集对冲统计数据
+                if hedge_success and hedge_info:
+                    hedge_size = abs(hedge_info.get('hedge_delta', 0))
+
+                    if hedge_size > 0:
+                        straddle_pair.temp_hedge_stats['hedge_sizes'].append(hedge_size)
+                        straddle_pair.temp_hedge_stats['total_hedge_operations'] += 1
+                    straddle_pair.temp_hedge_stats['hedge_enabled_trades'] += 1
             
             # 打印开仓信息
             print_straddle_opening_info(
@@ -351,6 +425,14 @@ def process_straddle_trading_position(
             atm_options,
             print_info=False
         )
+
+
+        if enable_delta_hedge and straddle_pair.delta_hedge_enabled and update_success:
+            current_hedge_size = abs(straddle_pair.current_hedge_delta)
+
+            if current_hedge_size > 0:
+                straddle_pair.temp_hedge_stats['hedge_sizes'].append(current_hedge_size)
+                straddle_pair.temp_hedge_stats['total_hedge_operations'] += 1
         
         # 每100个时间点显示一次希腊字母变化
         if processed_count % 100 == 0 and update_success:
@@ -433,6 +515,30 @@ def process_straddle_trading_position(
                 has_opened_position = False
                 total_asset += final_pnl
                 sum_asset_pnl = total_asset
+
+                if hasattr(straddle_pair, 'temp_hedge_stats'):
+                    hedge_stats['hedge_sizes'].extend(straddle_pair.temp_hedge_stats['hedge_sizes'])
+                    hedge_stats['total_hedge_operations'] += straddle_pair.temp_hedge_stats['total_hedge_operations']
+                    hedge_stats['hedge_enabled_trades'] += straddle_pair.temp_hedge_stats['hedge_enabled_trades']
+                    
+                    # 更新最大最小值
+                    if straddle_pair.temp_hedge_stats['hedge_sizes']:
+                        hedge_stats['max_hedge_size'] = max(hedge_stats['max_hedge_size'], max(straddle_pair.temp_hedge_stats['hedge_sizes']))
+                        if hedge_stats['min_hedge_size'] == float('inf'):
+                            hedge_stats['min_hedge_size'] = min(straddle_pair.temp_hedge_stats['hedge_sizes'])
+                        else:
+                            hedge_stats['min_hedge_size'] = min(hedge_stats['min_hedge_size'], min(straddle_pair.temp_hedge_stats['hedge_sizes']))
+                
+                # 🆕 收集合约胜率统计
+                contract_performance_stats['total_contracts'] += 1
+                contract_performance_stats['contract_pnls'].append(final_pnl)
+                contract_performance_stats['total_pnl_sum'] += final_pnl
+                
+                if final_pnl > 0:
+                    contract_performance_stats['profitable_contracts'] += 1
+                    contract_performance_stats['profitable_pnl_sum'] += final_pnl
+                else:
+                    contract_performance_stats['losing_pnl_sum'] += final_pnl
                 
                 # 使用函数打印平仓信息
                 print_straddle_closing_info(
@@ -460,9 +566,9 @@ def process_straddle_trading_position(
 
 
 def backtest_strategy(data_folder: str, 
-                    init_btc: float = 1.0, 
-                    enable_plot: bool = True, 
-                    plot_update_interval: int = 500, 
+                            init_btc: float = 1.0, 
+                            enable_plot: bool = True, 
+                            plot_update_interval: int = 500, 
                     save_folder: str = 'calendar_spread_backtest_result',
                     exclude_abnormal_trades: bool = True,
                     # Delta对冲参数
@@ -515,8 +621,8 @@ def backtest_strategy(data_folder: str,
         
         plt.tight_layout()
         plt.show(block=False)
-    
 
+    
     start_date = iterator.dates[-int(365 * 3)]
     end_date = iterator.dates[-1]
     print(f"回测时间范围: {start_date} 到 {end_date}")
@@ -539,6 +645,25 @@ def backtest_strategy(data_folder: str,
         'excluded_pnl_sum': 0.0  # 被排除的P&L总和
     }
 
+    # 🆕 Delta对冲统计
+    hedge_stats = {
+        'hedge_sizes': [],  # 记录所有对冲大小的绝对值
+        'max_hedge_size': 0.0,
+        'min_hedge_size': float('inf'),
+        'total_hedge_operations': 0,
+        'hedge_enabled_trades': 0
+    }
+
+    # 🆕 合约胜率统计
+    contract_performance_stats = {
+        'total_contracts': 0,
+        'profitable_contracts': 0,
+        'total_pnl_sum': 0.0,
+        'profitable_pnl_sum': 0.0,
+        'losing_pnl_sum': 0.0,
+        'contract_pnls': []  # 记录所有合约P&L
+    }
+
     # 🆕 初始化异常交易日志文件
     excluded_log_file = os.path.join(save_folder, 'excluded_trades_log.txt')
     
@@ -549,7 +674,7 @@ def backtest_strategy(data_folder: str,
         f.write(f"数据文件夹: {data_folder}\n")
         f.write(f"异常交易排除: {'启用' if exclude_abnormal_trades else '禁用'}\n")
         f.write(f"{'='*80}\n")
-
+    
     for time_point_data in iterator.iterate_date_range(start_date, end_date):
         processed_count += 1
         date = time_point_data['date'] 
@@ -558,7 +683,7 @@ def backtest_strategy(data_folder: str,
         atm_options = time_point_data['atm_options']
 
         unique_dates.add(date)
-        
+
         # 获取预测波动率
         predicted_vol, vol_model, vol_result = get_predicted_volatility(vol_tracker, spot, time_obj)
         
@@ -586,6 +711,8 @@ def backtest_strategy(data_folder: str,
                 total_asset=total_asset,
                 trade_quality_stats=trade_quality_stats,
                 excluded_log_file=excluded_log_file,
+                hedge_stats=hedge_stats,  # 🆕 添加
+                contract_performance_stats=contract_performance_stats,  # 🆕 添加
                 enable_delta_hedge=enable_delta_hedge,
                 delta_threshold=delta_threshold,
                 inverse_contract_multiplier=inverse_contract_multiplier,
@@ -612,6 +739,8 @@ def backtest_strategy(data_folder: str,
                 total_asset=total_asset,
                 trade_quality_stats=trade_quality_stats,
                 excluded_log_file=excluded_log_file,
+                hedge_stats=hedge_stats,  # 🆕 添加
+                contract_performance_stats=contract_performance_stats,  # 🆕 添加
                 enable_delta_hedge=enable_delta_hedge,
                 delta_threshold=delta_threshold,
                 inverse_contract_multiplier=inverse_contract_multiplier,
@@ -640,6 +769,8 @@ def backtest_strategy(data_folder: str,
                     total_asset=total_asset,
                     trade_quality_stats=trade_quality_stats,
                     excluded_log_file=excluded_log_file,
+                    hedge_stats=hedge_stats,  # 🆕 添加
+                    contract_performance_stats=contract_performance_stats,  # 🆕 添加
                     enable_delta_hedge=enable_delta_hedge,
                     delta_threshold=delta_threshold,
                     inverse_contract_multiplier=inverse_contract_multiplier,
@@ -667,6 +798,8 @@ def backtest_strategy(data_folder: str,
                         total_asset=total_asset,
                         trade_quality_stats=trade_quality_stats,
                         excluded_log_file=excluded_log_file,
+                        hedge_stats=hedge_stats,  # 🆕 添加
+                        contract_performance_stats=contract_performance_stats,  # 🆕 添加
                         enable_delta_hedge=enable_delta_hedge,
                         delta_threshold=delta_threshold,
                         inverse_contract_multiplier=inverse_contract_multiplier,
@@ -714,8 +847,12 @@ def backtest_strategy(data_folder: str,
 
     # 最终统计
     total_elapsed = time.time() - start_time
+
+    print("===========================PRINT HEGDE STATS===========================")
+    print_hedge_stats(hedge_stats, contract_performance_stats, save_folder=save_folder)
     
     # 打印最终报告
+    print("===========================PRINT FINAL BACKTEST REPORT===========================")
     metrics = print_final_backtest_report(
         processed_count=processed_count,
         opportunities_found=opportunities_found,
@@ -753,7 +890,7 @@ if __name__ == "__main__":
         enable_plot=True,
         plot_update_interval=500,
         exclude_abnormal_trades=True,
-        save_folder='delta_hedge_calendar_spread_sell_straddle_backtest_22_25',
+        save_folder='delta_risk_0.3_control_backtest_atm0.01',
         # 🆕 Delta对冲参数
         enable_delta_hedge=True,  # 启用Delta对冲
         delta_threshold=0.05,     # 5% Delta阈值

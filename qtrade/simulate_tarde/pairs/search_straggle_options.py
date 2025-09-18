@@ -1,0 +1,100 @@
+import numpy as np
+import pandas as pd
+
+def extract_best_pairs_for_selling(call_list, put_list, realized_vol, iv_threshold_pct):
+    if not call_list or not put_list or realized_vol is None:
+        return None
+    
+    # 筛选IV足够高的期权
+    valid_calls = [
+        call for call in call_list 
+        if call['iv'] - realized_vol >= iv_threshold_pct
+    ]
+    
+    valid_puts = [
+        put for put in put_list 
+        if put['iv'] - realized_vol >= iv_threshold_pct
+    ]
+    
+    if not valid_calls or not valid_puts:
+        return None
+    
+    # 找到平均IV最高的配对
+    best_pair = None
+    best_avg_iv = 0
+    
+    for call in valid_calls:
+        for put in valid_puts:
+            avg_iv = (call['iv'] + put['iv']) / 2
+            if avg_iv > best_avg_iv:
+                best_avg_iv = avg_iv
+                best_pair = {
+                    'call': call,
+                    'put': put,
+                    'avg_iv': avg_iv,
+                    'call_iv_premium': call['iv'] - realized_vol,
+                    'put_iv_premium': put['iv'] - realized_vol
+                }
+    
+    return best_pair
+
+def find_straggle_options(atm_options, 
+                            threshold, 
+                            min_days_to_expire= 7, 
+                            max_days_to_expire= 25, 
+                            realized_vol=None, 
+                            iv_threshold_pct=0.05,
+                            side="sell"):
+
+    # fillter options whose strke price is between spot_price(1-threshold) and spot_price(1+threshold)
+    if not atm_options:
+        return None
+    
+    # 获取现货价格
+    spot_price = atm_options[0].get('spot_open', atm_options[0].get('spot_price', None))
+    if spot_price is None:
+        return None
+    
+    # 计算价格范围
+    min_strike = spot_price * (1 - threshold)
+    max_strike = spot_price * (1 + threshold)
+    
+    # 筛选期权并按天数分组
+    options_by_days = {}
+    
+    for opt in atm_options:
+        # 检查到期天数
+        if min_days_to_expire <= opt['days_to_expiry'] <= max_days_to_expire:
+            # 检查执行价格范围
+            if min_strike <= opt['strike_price'] <= max_strike:
+                days = opt['days_to_expiry']
+                
+                # 初始化该天数的字典
+                if days not in options_by_days:
+                    options_by_days[days] = [[], []]  # [calls, puts]
+                
+                # 分类添加期权
+                if opt['option_type'] == 'C' and opt['strike_price'] > spot_price:
+                    options_by_days[days][0].append(opt)  # 添加到calls列表
+                elif opt['option_type'] == 'P' and opt['strike_price'] < spot_price:
+                    options_by_days[days][1].append(opt)  # 添加到puts列表
+    
+    best_options = []
+    if side == "sell":
+        for days in options_by_days:
+            best_selling_pair = extract_best_pairs_for_selling(options_by_days[days][0], options_by_days[days][1], realized_vol, iv_threshold_pct)
+            if best_selling_pair:
+                best_options.append(best_selling_pair)
+    
+    else:
+        pass 
+
+
+    if best_options == []:
+        return None
+    
+    # extract best pairs for selling based on smallest combined delta 
+    best_options = sorted(best_options, key=lambda x: abs(x['call']['pa_delta'] + x['put']['pa_delta']))
+    
+    return best_options[0]
+    
