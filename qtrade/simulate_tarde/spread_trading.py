@@ -30,6 +30,70 @@ from qtrade.simulate_tarde.straddle_helper import (
     should_exclude_straddle_trade, log_excluded_straddle_trade
 )
 
+from qtrade.simulate_tarde.pairs.search_straggle_options import find_sell_straggle_opportunity
+
+
+
+def save_experiment_params(save_folder, data_folder, strategy_name, init_btc,
+                          exclude_abnormal_trades, use_straggle_search, price_pct_threshold,
+                          enable_delta_hedge, delta_threshold, hedge_cost_bps, 
+                          inverse_contract_multiplier, max_delta_threshold, max_loss_pct, target_profit_pct, 
+                          enable_plot, plot_update_interval):
+    """
+    保存实验参数到JSON文件
+    
+    Args:
+        save_folder: 保存文件夹路径
+        data_folder: 数据文件夹路径
+        strategy_name: 策略名称
+        init_btc: 初始BTC数量
+        exclude_abnormal_trades: 是否排除异常交易
+        use_straggle_search: 是否使用straggle搜索
+        price_pct_threshold: 价格百分比阈值
+        enable_delta_hedge: 是否启用Delta对冲
+        delta_threshold: Delta阈值
+        hedge_cost_bps: 对冲成本(bps)
+        inverse_contract_multiplier: 反向合约乘数
+        enable_plot: 是否启用绘图
+        plot_update_interval: 绘图更新间隔
+    """
+    import json
+    from datetime import datetime
+    
+    experiment_params = {
+        "experiment_info": {
+            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "data_folder": data_folder,
+            "save_folder": save_folder
+        },
+        "strategy_params": {
+            "strategy_name": strategy_name,
+            "init_btc": init_btc,
+            "exclude_abnormal_trades": exclude_abnormal_trades,
+            "use_straggle_search": use_straggle_search,
+            "price_pct_threshold": price_pct_threshold
+        },
+        "delta_hedge_params": {
+            "enable_delta_hedge": enable_delta_hedge,
+            "delta_threshold": delta_threshold,
+            "hedge_cost_bps": hedge_cost_bps,
+            "inverse_contract_multiplier": inverse_contract_multiplier,
+            "max_delta_threshold": max_delta_threshold,
+            "max_loss_pct": max_loss_pct,
+            "target_profit_pct": target_profit_pct
+        },
+        "display_params": {
+            "enable_plot": enable_plot,
+            "plot_update_interval": plot_update_interval
+        }
+    }
+    
+    # 保存参数到JSON文件
+    params_file = os.path.join(save_folder, "experiment_params.json")
+    with open(params_file, 'w', encoding='utf-8') as f:
+        json.dump(experiment_params, f, indent=2, ensure_ascii=False)
+    
+    print(f"📝 实验参数已保存到: {params_file}")
 
 
 def get_predicted_volatility(vol_tracker, spot_price, time_obj):
@@ -92,7 +156,10 @@ def process_calendar_trading_position(
     delta_threshold=0.05,
     inverse_contract_multiplier=1.0,
     hedge_cost_bps=0.0002,
-    exclude_abnormal_trades=True
+    exclude_abnormal_trades=True,
+    max_delta_threshold=0.4,
+    max_loss_pct=0.3,
+    target_profit_pct=0.5
 ):
     """
     处理Calendar Spread交易位置的完整逻辑
@@ -106,7 +173,10 @@ def process_calendar_trading_position(
     
     # 检查Calendar Spread机会
     if not has_opened_position:
-        calendar_spread_options = find_atm_calendar_pair(atm_options)
+        calendar_spread_options = find_atm_calendar_pair(atm_options, 
+                                                        min_days_gap=14,
+                                                        atm_tolerance=0.03, 
+                                                        min_iv_spread=0.01)
         
         if calendar_spread_options:
             has_opened_position = True
@@ -197,7 +267,7 @@ def process_calendar_trading_position(
                 print(f"   当前现货价: ${spot:,.0f}")
         
         if update_success:
-            should_close, reason = calendar_pair.should_close(time_obj, spot, iv_reversal_close=True)
+            should_close, reason = calendar_pair.should_close(time_obj, spot, max_loss_pct=max_loss_pct, target_profit_pct=target_profit_pct, iv_reversal_close=True, max_delta_threshold=max_delta_threshold, inti_BTC=1.0)
         else:
             should_close = True
             
@@ -341,8 +411,13 @@ def process_straddle_trading_position(
     inverse_contract_multiplier=1.0,
     hedge_cost_bps=0.0002,
     exclude_abnormal_trades=True,
+    max_delta_threshold=0.4,
+    max_loss_pct=0.3,
+    target_profit_pct=0.5,
     # Straddle特定参数
-    iv_threshold_pct=0.05
+    iv_threshold_pct=0.05,
+    use_straggle_search=False,
+    price_pct_threshold=0.01
 ):
     """
     处理Straddle交易位置的完整逻辑 - 专注于Sell Straddle
@@ -356,7 +431,25 @@ def process_straddle_trading_position(
     
     # 检查Sell Straddle机会
     if not has_opened_position:
-        straddle_opportunity = find_sell_straddle_opportunity(atm_options, predicted_vol, iv_threshold_pct, spot)
+        if use_straggle_search:
+            straddle_opportunity = find_sell_straggle_opportunity(
+                atm_options=atm_options,
+                threshold=price_pct_threshold,
+                min_days_to_expire=7,
+                max_days_to_expire=25,
+                realized_vol=predicted_vol,
+                iv_threshold_pct=iv_threshold_pct,
+                side="sell"
+            )
+        else:
+            # 🔄 使用原有函数，使用参数化的容差
+            straddle_opportunity = find_sell_straddle_opportunity(
+                atm_options=atm_options,
+                realized_vol=predicted_vol,
+                iv_threshold_pct=iv_threshold_pct,
+                spot_price=spot,
+                price_tolerance=price_pct_threshold  # 使用参数化的容差
+            )
         
 
         if straddle_opportunity:
@@ -450,7 +543,7 @@ def process_straddle_trading_position(
                 print(f"   当前现货价: ${spot:,.0f}")
         
         if update_success:
-            should_close, reason = straddle_pair.should_close(time_obj, spot, iv_reversal_close=True)
+            should_close, reason = straddle_pair.should_close(time_obj, spot, max_loss_pct=max_loss_pct, target_profit_pct=target_profit_pct, iv_reversal_close=True, max_delta_threshold=max_delta_threshold, inti_BTC=1.0)
         else:
             should_close = True
             
@@ -576,11 +669,37 @@ def backtest_strategy(data_folder: str,
                     delta_threshold: float = 0.05,
                     hedge_cost_bps: float = 0.0002,
                     inverse_contract_multiplier: float = 1.0, 
-                    strategy_name: str = "calendar_spread"):
+                    # 风险控制参数
+                    max_delta_threshold: float = 0.4,
+                    max_loss_pct: float = 0.3,
+                    target_profit_pct: float = 0.5,
+                    strategy_name: str = "calendar_spread",
+                    use_straggle_search: bool = False,
+                    price_pct_threshold: float = 0.01):
     """
     Calendar Spread回测 - 增加异常交易排除功能
     """
     os.makedirs(save_folder, exist_ok=True)
+    
+    # 🆕 保存实验参数
+    save_experiment_params(
+        save_folder=save_folder,
+        data_folder=data_folder,
+        strategy_name=strategy_name,
+        init_btc=init_btc,
+        exclude_abnormal_trades=exclude_abnormal_trades,
+        use_straggle_search=use_straggle_search,
+        price_pct_threshold=price_pct_threshold,
+        enable_delta_hedge=enable_delta_hedge,
+        delta_threshold=delta_threshold,
+        hedge_cost_bps=hedge_cost_bps,
+        inverse_contract_multiplier=inverse_contract_multiplier,
+        max_delta_threshold=max_delta_threshold,
+        max_loss_pct=max_loss_pct,
+        target_profit_pct=target_profit_pct,
+        enable_plot=enable_plot,
+        plot_update_interval=plot_update_interval
+    )
 
     iterator = ATMOptionsIterator(
         data_folder,
@@ -717,7 +836,10 @@ def backtest_strategy(data_folder: str,
                 delta_threshold=delta_threshold,
                 inverse_contract_multiplier=inverse_contract_multiplier,
                 hedge_cost_bps=hedge_cost_bps,
-                exclude_abnormal_trades=exclude_abnormal_trades
+                exclude_abnormal_trades=exclude_abnormal_trades,
+                max_delta_threshold=max_delta_threshold,
+                max_loss_pct=max_loss_pct,
+                target_profit_pct=target_profit_pct
             )
         elif strategy_name == "gamma_scalping_sell_straddle":
             (has_opened_position, straddle_pair, opportunities_found, 
@@ -746,7 +868,12 @@ def backtest_strategy(data_folder: str,
                 inverse_contract_multiplier=inverse_contract_multiplier,
                 hedge_cost_bps=hedge_cost_bps,
                 exclude_abnormal_trades=exclude_abnormal_trades,
-                iv_threshold_pct=0.05
+                max_delta_threshold=max_delta_threshold,
+                max_loss_pct=max_loss_pct,
+                target_profit_pct=target_profit_pct,
+                iv_threshold_pct=0.05,
+                use_straggle_search=use_straggle_search,
+                price_pct_threshold=price_pct_threshold
             )
         elif strategy_name == "gamma_scalping_sell_calendar_spread":
             if straddle_pair is None:
@@ -775,7 +902,10 @@ def backtest_strategy(data_folder: str,
                     delta_threshold=delta_threshold,
                     inverse_contract_multiplier=inverse_contract_multiplier,
                     hedge_cost_bps=hedge_cost_bps,
-                    exclude_abnormal_trades=exclude_abnormal_trades
+                    exclude_abnormal_trades=exclude_abnormal_trades,
+                    max_delta_threshold=max_delta_threshold,
+                    max_loss_pct=max_loss_pct,
+                    target_profit_pct=target_profit_pct
                 )
             
             if calendar_pair is None:
@@ -805,7 +935,12 @@ def backtest_strategy(data_folder: str,
                         inverse_contract_multiplier=inverse_contract_multiplier,
                         hedge_cost_bps=hedge_cost_bps,
                         exclude_abnormal_trades=exclude_abnormal_trades,
-                        iv_threshold_pct=0.05
+                        max_delta_threshold=max_delta_threshold,
+                        max_loss_pct=max_loss_pct,
+                        target_profit_pct=target_profit_pct,
+                        iv_threshold_pct=0.05,
+                        use_straggle_search=use_straggle_search,
+                        price_pct_threshold=price_pct_threshold
                     )
 
         else:
@@ -823,10 +958,10 @@ def backtest_strategy(data_folder: str,
             update_plot(ax, line, time_list, sum_asset_pnl_list, init_btc)
             
             # 动态保存图表
-            current_timestamp = time_obj.strftime('%Y%m%d_%H%M%S')
-            dynamic_filename = f'calendar_spread_progress_{processed_count:06d}_{current_timestamp}.png'
-            plt.savefig(os.path.join(save_folder, dynamic_filename), dpi=300, bbox_inches='tight')
-            print(f"📊 进度图表已保存: {dynamic_filename}")
+            # 使用固定文件名，覆盖之前的中间进度图
+            progress_filename = 'backtest_progress_temp.png'
+            plt.savefig(os.path.join(save_folder, progress_filename), dpi=300, bbox_inches='tight')
+            print(f"📊 进度图表已更新: {progress_filename} (处理进度: {processed_count})")
         
         # 每1000个时间点显示进度
         if processed_count % 1000 == 0:
@@ -879,7 +1014,7 @@ if __name__ == "__main__":
         "gamma_scalping_sell_calendar_spread",
     ])
 
-    strategy_name = "gamma_scalping_sell_calendar_spread"
+    strategy_name = "gamma_scalping_sell_straddle"
 
     assert strategy_name in strategy_set, f"策略名称 {strategy_name} 不在策略集合中"
     
@@ -890,13 +1025,21 @@ if __name__ == "__main__":
         enable_plot=True,
         plot_update_interval=500,
         exclude_abnormal_trades=True,
-        save_folder='delta_risk_0.3_control_backtest_atm0.01',
+        save_folder='gamma_scalping_sell_straggle_results',
+
         # 🆕 Delta对冲参数
         enable_delta_hedge=True,  # 启用Delta对冲
-        delta_threshold=0.05,     # 5% Delta阈值
+        delta_threshold=0.05,     # 5% Delta阈值, once exceed, hedge 
         hedge_cost_bps=0.0000,   # 2bps手续费
         inverse_contract_multiplier=1.0, 
-        strategy_name=strategy_name
+        strategy_name=strategy_name,
+        use_straggle_search=True, 
+        price_pct_threshold=0.01, 
+
+        # risk control parameters
+        max_loss_pct=0.3,
+        target_profit_pct=0.5,
+        max_delta_threshold = 0.4, # close when combined delta exceed this threshold
     )
 
 

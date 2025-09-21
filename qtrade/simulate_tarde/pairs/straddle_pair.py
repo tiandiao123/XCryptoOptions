@@ -37,7 +37,7 @@ def find_straddle_opportunity(atm_options, realized_vol=None, iv_threshold_pct=0
     return None
 
 
-def find_sell_straddle_opportunity(atm_options, realized_vol=None, iv_threshold_pct=0.05, spot_price=None):
+def find_sell_straddle_opportunity(atm_options, realized_vol=None, iv_threshold_pct=0.05, spot_price=None, price_tolerance=0.01):
     """
     寻找Short Straddle机会 - 7-20天期权，IV高估时卖出，执行价格在现货价格±1%范围内
     
@@ -46,6 +46,7 @@ def find_sell_straddle_opportunity(atm_options, realized_vol=None, iv_threshold_
         realized_vol: 已实现波动率（年化）
         iv_threshold_pct: IV高于RV的阈值（默认5%）
         spot_price: 现货价格（用于ATM筛选，可选）
+        price_tolerance: 价格容忍度（默认1%）
         
     Returns:
         dict or None: Short Straddle配置
@@ -61,8 +62,7 @@ def find_sell_straddle_opportunity(atm_options, realized_vol=None, iv_threshold_
     if spot_price is None:
         return None
     
-    # 🆕 计算±1%价格范围
-    price_tolerance = 0.01  # 1%
+    # �� 计算±1%价格范围
     min_strike = spot_price * (1 - price_tolerance)
     max_strike = spot_price * (1 + price_tolerance)
     

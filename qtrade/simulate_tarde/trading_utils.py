@@ -111,6 +111,10 @@ def print_hedge_stats(hedge_stats, contract_performance_stats, save_folder=None)
             print(f"   盈亏比: N/A (无亏损合约)")
         print(f"   总P&L: {contract_performance_stats['total_pnl_sum']:.6f} BTC")
         
+        # 🆕 添加整体平均P&L
+        overall_avg_pnl = contract_performance_stats['total_pnl_sum'] / contract_performance_stats['total_contracts']
+        print(f"   整体平均P&L: {overall_avg_pnl:.6f} BTC")
+        
         # 🆕 绘制合约P&L分布图
         _plot_contract_pnl_distribution(contract_performance_stats, save_folder)
     else:
@@ -128,41 +132,48 @@ def _plot_hedge_statistics(hedge_stats, save_folder=None):
     # 1. 对冲大小分布直方图
     ax1.hist(hedge_sizes, bins=20, alpha=0.7, color='orange', edgecolor='black')
     ax1.axvline(np.mean(hedge_sizes), color='red', linestyle='--', 
-                label=f'均值: {np.mean(hedge_sizes):.4f}')
-    ax1.set_xlabel('Hedge size (BTC)')
+                label=f'Mean: {np.mean(hedge_sizes):.4f}')
+    ax1.set_xlabel('Current Hedge Position Size (BTC)')
     ax1.set_ylabel('Frequency')
-    ax1.set_title('Delta hedge size distribution')
+    ax1.set_title('Delta Hedge Position Size Distribution\n(Current Holdings, Not Incremental Changes)')
     ax1.legend()
     ax1.grid(True, alpha=0.3)
     
     # 2. 对冲大小时间序列
     ax2.plot(range(len(hedge_sizes)), hedge_sizes, 'o-', alpha=0.7, markersize=3)
-    ax2.set_xlabel('Delta hedge operation number')
-    ax2.set_ylabel('Delta hedge size (BTC)')
-    ax2.set_title('Delta hedge size time series')
+    ax2.set_xlabel('P&L Update Number (Every 30min)')
+    ax2.set_ylabel('Current Hedge Position Size (BTC)')
+    ax2.set_title('Delta Hedge Position Size Over Time\n(Snapshots of Current Holdings)')
     ax2.grid(True, alpha=0.3)
     
     # 3. 对冲大小箱线图
     ax3.boxplot(hedge_sizes, vert=True)
-    ax3.set_ylabel('Delta hedge size (BTC)')
-    ax3.set_title('Delta hedge size distribution box plot')
+    ax3.set_ylabel('Current Hedge Position Size (BTC)')
+    ax3.set_title('Delta Hedge Position Size Distribution\n(Box Plot of Current Holdings)')
     ax3.grid(True, alpha=0.3)
     
     # 4. 统计汇总文本
     ax4.axis('off')
-    stats_text = f"""Delta hedge statistics summary
+    stats_text = f"""Delta Hedge Statistics Summary
     
-total delta hedge operations: {hedge_stats['total_hedge_operations']:,}次
-the number of initiating delta hedge for contracts: {hedge_stats['hedge_enabled_trades']:,}笔
+📊 Data Collection Method:
+• Records CURRENT hedge position size at each P&L update
+• NOT incremental changes, but absolute position size
+• Updated every 30 minutes during active positions
 
-Hedge size statistics:
+📈 Operation Summary:
+• Total P&L updates recorded: {hedge_stats['total_hedge_operations']:,}
+• Contracts with delta hedging: {hedge_stats['hedge_enabled_trades']:,}
+• Avg updates per contract: {hedge_stats['total_hedge_operations']/max(1,hedge_stats['hedge_enabled_trades']):.0f}
+
+📋 Current Position Size Statistics:
 • Maximum: {hedge_stats['max_hedge_size']:.4f} BTC
 • Minimum: {hedge_stats['min_hedge_size']:.4f} BTC  
 • Mean: {np.mean(hedge_sizes):.4f} BTC
 • Median: {np.median(hedge_sizes):.4f} BTC
 • Standard deviation: {np.std(hedge_sizes):.4f} BTC
 
-Quartiles:
+📊 Quartiles:
 • 25%: {np.percentile(hedge_sizes, 25):.4f} BTC
 • 75%: {np.percentile(hedge_sizes, 75):.4f} BTC
 • 95%: {np.percentile(hedge_sizes, 95):.4f} BTC
@@ -195,7 +206,7 @@ def _plot_contract_pnl_distribution(contract_stats, save_folder=None):
     ax1.hist(pnls, bins=20, alpha=0.7, color='steelblue', edgecolor='black')
     ax1.axvline(0, color='red', linestyle='-', alpha=0.7, label='Break even point')
     ax1.axvline(np.mean(pnls), color='orange', linestyle='--', 
-                label=f'均值: {np.mean(pnls):.6f}')
+                label=f'Mean: {np.mean(pnls):.6f}')
     ax1.set_xlabel('P&L (BTC)')
     ax1.set_ylabel('Frequency')
     ax1.set_title('Contracts P&L distribution')
