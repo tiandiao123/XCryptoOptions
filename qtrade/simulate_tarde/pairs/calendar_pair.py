@@ -883,7 +883,14 @@ class CalendarPair:
             'option_symbols': self.option_symbols.copy()
         }
     
-    def should_close(self, current_time, current_spot_price=None, max_loss_pct=0.3, target_profit_pct=0.5, iv_reversal_close=True):
+    def should_close(self, 
+                    current_time, 
+                    current_spot_price=None, 
+                    max_loss_pct=0.3, 
+                    target_profit_pct=0.5, 
+                    iv_reversal_close=True, 
+                    max_delta_threshold = 0.5, 
+                    inti_BTC = 1.0):
         """
         平仓条件检查 - 增强版本，包含IV价差反转检查
         
@@ -929,6 +936,19 @@ class CalendarPair:
         # 止盈条件
         if pnl_pct > target_profit_pct:
             return True, f"止盈 (P&L: {pnl_pct*100:.1f}%)"
+
+        
+        current_net_delta = self.get_net_delta()
+        if abs(current_net_delta) > max_delta_threshold * inti_BTC:
+
+            if abs(self.current_hedge_delta) > 1:
+                print(f"Delta风险过大强制平仓 (净Delta: {current_net_delta:+.3f} BTC > ±{max_delta_threshold:.1f})")
+                print(f"self.current_hedge_delta: {self.current_hedge_delta}")
+                print(f"long option delta: {self.long_option_delta}")
+                print(f"short option delta: {self.short_option_delta}")
+                exit(0)
+                
+            return True, f"Delta风险过大强制平仓 (净Delta: {current_net_delta:+.3f} BTC > ±{max_delta_threshold:.1f})"
         
         # 🆕 时间衰减保护：如果接近短期期权到期且没有盈利，考虑平仓
         short_expiry_date = parse_option_expiry_date(self.option_symbols['short_option'])
