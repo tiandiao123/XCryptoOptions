@@ -30,7 +30,7 @@ from qtrade.simulate_tarde.straddle_helper import (
     should_exclude_straddle_trade, log_excluded_straddle_trade
 )
 
-from qtrade.simulate_tarde.pairs.search_straggle_options import find_sell_straggle_opportunity
+from qtrade.simulate_tarde.pairs.search_straggle_options import find_buy_straggle_opportunity, find_sell_straggle_opportunity
 
 
 
@@ -441,6 +441,25 @@ def process_straddle_trading_position(
                 iv_threshold_pct=iv_threshold_pct,
                 side="sell"
             )
+            
+            side = "sell"
+            if straddle_opportunity is None:
+                straddle_opportunity = find_buy_straggle_opportunity(
+                    atm_options=atm_options,
+                    threshold=price_pct_threshold,
+                    min_days_to_expire=15,
+                    max_days_to_expire=35,
+                    iv_threshold_pct=0.01,
+                    realized_vol=predicted_vol,
+                    side="buy"
+                )
+                side = "buy"
+            
+            # for debug 
+            if straddle_opportunity is not None and side == "buy":
+                print(straddle_opportunity)
+                # exit(0)
+                
         else:
             # 🔄 使用原有函数，使用参数化的容差
             straddle_opportunity = find_sell_straddle_opportunity(
@@ -543,7 +562,14 @@ def process_straddle_trading_position(
                 print(f"   当前现货价: ${spot:,.0f}")
         
         if update_success:
-            should_close, reason = straddle_pair.should_close(time_obj, spot, max_loss_pct=max_loss_pct, target_profit_pct=target_profit_pct, iv_reversal_close=True, max_delta_threshold=max_delta_threshold, inti_BTC=1.0)
+            should_close, reason = straddle_pair.should_close(time_obj, 
+                                                               spot, 
+                                                               max_loss_pct=max_loss_pct, 
+                                                               target_profit_pct=target_profit_pct, 
+                                                               iv_reversal_close=True, 
+                                                               max_delta_threshold=max_delta_threshold, 
+                                                               inti_BTC=1.0, 
+                                                               predicted_vol=predicted_vol)
         else:
             should_close = True
             
@@ -1005,6 +1031,8 @@ def backtest_strategy(data_folder: str,
         strategy_name="Calendar Spread Strategy"
     )
 
+    return time_list, sum_asset_pnl_list
+
 if __name__ == "__main__":
     data_folder = '/home/ubuntu/options_trading/data/okx_data_processor/options_geeks/fixed_options_with_iv_greeks'
     
@@ -1014,7 +1042,7 @@ if __name__ == "__main__":
         "gamma_scalping_sell_calendar_spread",
     ])
 
-    strategy_name = "gamma_scalping_sell_straddle"
+    strategy_name = "calendar_spread"
 
     assert strategy_name in strategy_set, f"策略名称 {strategy_name} 不在策略集合中"
     
@@ -1025,7 +1053,7 @@ if __name__ == "__main__":
         enable_plot=True,
         plot_update_interval=500,
         exclude_abnormal_trades=True,
-        save_folder='gamma_scalping_sell_straggle_results',
+        save_folder='calendar_spread_results',
 
         # 🆕 Delta对冲参数
         enable_delta_hedge=True,  # 启用Delta对冲

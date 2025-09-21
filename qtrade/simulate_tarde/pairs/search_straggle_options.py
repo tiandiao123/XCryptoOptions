@@ -167,8 +167,8 @@ def extract_best_pairs_for_buying(call_list, put_list, realized_vol, iv_threshol
 
 def find_buy_straggle_opportunity(atm_options, 
                             threshold, 
-                            min_days_to_expire= 7, 
-                            max_days_to_expire= 25, 
+                            min_days_to_expire= 15, 
+                            max_days_to_expire= 35, 
                             realized_vol=None, 
                             iv_threshold_pct=0.05,
                             side="buy"):

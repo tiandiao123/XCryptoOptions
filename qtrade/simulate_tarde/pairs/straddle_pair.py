@@ -340,6 +340,7 @@ class StraddlePair:
             self.hedge_transactions = []
             self.total_hedge_cost = 0.0
         
+        
         print(f"✅ {self.strategy_type.replace('_', ' ').title()}创建:")
         print(f"   执行价格: ${self.strike_price:,.2f}")
         print(f"   入场现货价: ${entry_spot_price:,.2f}")
@@ -755,6 +756,7 @@ class StraddlePair:
     def should_close(self, 
                     current_time, 
                     current_spot_price=None, 
+                    predicted_vol=None,
                     max_loss_pct=0.3, 
                     target_profit_pct=0.5, 
                     price_threshold_pct=0.15, 
@@ -768,14 +770,28 @@ class StraddlePair:
             return False, "已平仓"
         
         # 🆕 IV反转检查（对于Short Straddle特别重要）
-        if iv_reversal_close and "short" in self.strategy_type:
-            entry_avg_iv = (self.entry_greeks['call_option']['iv'] + self.entry_greeks['put_option']['iv']) / 2
-            current_avg_iv = self.get_average_iv()
-            
-            # 如果IV大幅下降（Short Straddle获利信号）
-            iv_decline = entry_avg_iv - current_avg_iv
-            if iv_decline > 0.10:  # IV下降超过10%
-                return True, f"IV大幅下降平仓 (IV下降: {iv_decline:.1%})"
+        if iv_reversal_close:
+            if "short" in self.strategy_type:
+                entry_avg_iv = (self.entry_greeks['call_option']['iv'] + self.entry_greeks['put_option']['iv']) / 2
+                current_avg_iv = self.get_average_iv()
+                
+                # 如果IV大幅下降（Short Straddle获利信号）
+                iv_decline = entry_avg_iv - current_avg_iv
+                if iv_decline > 0.10:  # IV下降超过10%
+                    return True, f"IV大幅下降平仓 (IV下降: {iv_decline:.1%})"
+            else:
+                entry_avg_iv = (self.entry_greeks['call_option']['iv'] + self.entry_greeks['put_option']['iv']) / 2
+                current_avg_iv = self.get_average_iv()
+                
+                iv_increase = current_avg_iv - entry_avg_iv
+
+                if iv_increase > 0.10:  # IV上升超过10%
+                    return True, f"IV大幅上升平仓 (IV上升: {iv_increase:.1%})"
+                # get current realized vol
+                assert predicted_vol is not None, "predicted_vol is None"
+                if current_avg_iv > predicted_vol * (1 + 0.015):
+                    return True, f"IV大幅上升平仓 (IV上升: {iv_increase:.1%})"
+
         
         # 计算P&L百分比
         if abs(self.entry_premium) > 1e-8:
@@ -793,15 +809,17 @@ class StraddlePair:
 
         
         # 🆕 Delta风险控制 - 净Delta过大时强制平仓
-        current_net_delta = self.get_net_delta()
-        if abs(current_net_delta) > max_delta_threshold * inti_BTC:
-            if abs(self.current_hedge_delta) > 1:
-                print(f"Delta风险过大强制平仓 (净Delta: {current_net_delta:+.3f} BTC > ±{max_delta_threshold:.1f})")
-                print(f"self.current_hedge_delta: {self.current_hedge_delta}")
-                print(f"call option delta: {self.call_delta}")
-                print(f"put option delta: {self.put_delta}")
-                exit(0)
-            return True, f"Delta风险过大强制平仓 (净Delta: {current_net_delta:+.3f} BTC > ±{max_delta_threshold:.1f})"
+        
+        if self.delta_hedge_enabled:
+            current_net_delta = self.get_net_delta()
+            if abs(current_net_delta) > max_delta_threshold * inti_BTC:
+                if abs(self.current_hedge_delta) > 1:
+                    print(f"Delta风险过大强制平仓 (净Delta: {current_net_delta:+.3f} BTC > ±{max_delta_threshold:.1f})")
+                    print(f"self.current_hedge_delta: {self.current_hedge_delta}")
+                    print(f"call option delta: {self.call_delta}")
+                    print(f"put option delta: {self.put_delta}")
+                    exit(0)
+                return True, f"Delta风险过大强制平仓 (净Delta: {current_net_delta:+.3f} BTC > ±{max_delta_threshold:.1f})"
         
         # Straddle特有的平仓条件
         if current_spot_price is not None:
