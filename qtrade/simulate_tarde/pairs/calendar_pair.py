@@ -1,6 +1,5 @@
 import re
 from datetime import datetime, date
-from qtrade.data_utils import get_option_open_price
 
 
 def find_atm_calendar_pair(atm_options, spot_price=None, min_days_gap=7, atm_tolerance=0.03, min_iv_spread=0.02):

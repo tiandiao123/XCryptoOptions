@@ -2,7 +2,7 @@ import re
 import numpy as np
 import time
 from datetime import datetime, date
-from qtrade.data_utils import get_option_open_price, get_option_full_info
+from qtrade.simulate_tarde.data_loader.data_utils import get_option_open_price, get_option_full_info
 
 
 def find_straddle_opportunity(atm_options, realized_vol=None, iv_threshold_pct=0.05):
@@ -544,29 +544,29 @@ class StraddlePair:
             print(f"   当前权利金: {current_premium:.6f} BTC")
             print(f"   期权P&L: {self.current_options_pnl:.6f} BTC")
 
-        
-            # 🆕 添加Delta对冲信息
-            if self.delta_hedge_enabled:
-                print(f"   永续P&L: {self.inverse_perpetual_pnl:.6f} BTC")
-                print(f"   已实现P&L: {self.realized_perpetual_pnl:.6f} BTC")
-                print(f"   总P&L: {self.current_pnl:.6f} BTC")
-                print(f"   对冲合约: {self.current_hedge_delta:+.3f} BTC")
-                print(f"   平均持仓价: ${self.average_hedge_spot_price:,.0f}")
-                if current_spot_price:
-                    print(f"   当前现货价: ${current_spot_price:,.0f}")
-            else:
-                print(f"   总P&L: {self.current_options_pnl:.6f} BTC")
-            
-            print(f"   Call价格: {self.call_price:.6f} BTC (IV: {self.call_iv:.1%})")
-            print(f"   Put价格: {self.put_price:.6f} BTC (IV: {self.put_iv:.1%})")
-            print(f"   净Delta: {self.get_net_delta():+.3f}")
-                
+    
+        # 🆕 添加Delta对冲信息
+        if self.delta_hedge_enabled:
+            print(f"   永续P&L: {self.inverse_perpetual_pnl:.6f} BTC")
+            print(f"   已实现P&L: {self.realized_perpetual_pnl:.6f} BTC")
+            print(f"   总P&L: {self.current_pnl:.6f} BTC")
+            print(f"   对冲合约: {self.current_hedge_delta:+.3f} BTC")
+            print(f"   平均持仓价: ${self.average_hedge_spot_price:,.0f}")
             if current_spot_price:
-                print(f"   现货价格: ${current_spot_price:,.2f}")
-                print(f"   价格变化: {(current_spot_price - self.entry_spot_price) / self.entry_spot_price * 100:+.2f}%")
-                moneyness = current_spot_price / self.strike_price
-                print(f"   Moneyness: {moneyness:.3f}")
+                print(f"   当前现货价: ${current_spot_price:,.0f}")
+        else:
+            print(f"   总P&L: {self.current_options_pnl:.6f} BTC")
         
+        print(f"   Call价格: {self.call_price:.6f} BTC (IV: {self.call_iv:.1%})")
+        print(f"   Put价格: {self.put_price:.6f} BTC (IV: {self.put_iv:.1%})")
+        print(f"   净Delta: {self.get_net_delta():+.3f}")
+                
+        if current_spot_price:
+            print(f"   现货价格: ${current_spot_price:,.2f}")
+            print(f"   价格变化: {(current_spot_price - self.entry_spot_price) / self.entry_spot_price * 100:+.2f}%")
+            moneyness = current_spot_price / self.strike_price
+            print(f"   Moneyness: {moneyness:.3f}")
+            
         return True, "success"
             
     def get_net_delta(self):

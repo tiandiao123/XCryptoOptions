@@ -117,7 +117,7 @@ def print_hedge_stats(hedge_stats, contract_performance_stats, save_folder=None)
         
         # 🆕 绘制合约P&L分布图
         _plot_contract_pnl_distribution(contract_performance_stats, save_folder)
-    else:
+            else:
         print(f"\n🎯 合约胜率统计: 无交易合约")
 
 
@@ -287,7 +287,7 @@ def print_final_backtest_report(
         save_folder: 保存文件夹
         enable_plot: 是否启用图表
         strategy_name: 策略名称
-    
+        
     Returns:
         dict: 性能指标字典
     """

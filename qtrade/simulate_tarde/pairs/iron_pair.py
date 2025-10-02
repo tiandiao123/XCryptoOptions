@@ -1,6 +1,7 @@
 import re
 from datetime import datetime, date
-from qtrade.data_utils import get_option_open_price
+
+from qtrade.simulate_tarde.data_loader.data_utils import get_option_open_price
 
 
 def find_iron_condor_opportunity(atm_options, spot_price, min_iv_threshold=0.6):

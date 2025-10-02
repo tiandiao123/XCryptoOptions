@@ -2,7 +2,7 @@
 
 import os
 import numpy as np
-from qtrade.data_utils import get_option_full_info
+from qtrade.simulate_tarde.data_loader.data_utils import get_option_full_info
 
 
 def print_straddle_opening_info(straddle_pair, straddle_opportunity, spot, time_obj, 
