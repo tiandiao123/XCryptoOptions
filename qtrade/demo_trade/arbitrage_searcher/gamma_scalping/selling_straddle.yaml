@@ -1,0 +1,177 @@
+# Gamma Scalping - Selling Straddle Strategy Configuration
+# 基于IV高估时卖出ATM Straddle进行Gamma Scalping
+
+# ============================================================================
+# CORE STRATEGY CRITERIA - 核心策略条件
+# ============================================================================
+
+# Volatility Condition - 波动率条件
+volatility_criteria:
+  min_iv_premium: 0.03                     # 最小IV溢价：IV > RV + 5%
+  
+# Time to Expiration - 到期时间条件
+time_criteria:
+  min_days_to_expiry: 7                   # 最小到期天数
+  max_days_to_expiry: 35                  # 最大到期天数 (Sweet spot for time decay)
+  optimal_days_range: [7, 25]            # 最优到期天数范围
+  
+# Strike Selection - 执行价选择条件  
+strike_criteria:
+  atm_tolerance_pct: 0.01                 # ATM容忍度：±1% of spot price
+  # abs(strike_price - spot_price) / spot_price <= 1%
+  
+# ============================================================================
+# STRADDLE PAIRING LOGIC - Straddle配对逻辑
+# ============================================================================
+
+pairing_criteria:
+  # Call/Put配对条件
+  strike_match_tolerance: 0.005           # 执行价格匹配容忍度（0.5%）
+  expiry_match_tolerance_days: 0          # 到期时间匹配容忍度（Straddle必须完全相同的到期日）
+  
+  # 数据有效性检查
+  min_iv: 0.01                           # 最小IV（1%）
+  min_option_price: 0.0001               # 最小期权价格
+  max_iv: 3.0                            # 最大IV（300%，避免异常数据）
+
+# ============================================================================
+# MARKET DATA FILTERS - 市场数据筛选
+# ============================================================================
+
+market_filters:
+  # 流动性要求
+  liquidity:
+    min_bid_price: 0.001                 # 最小买价（避免无流动性期权）
+    max_bid_ask_spread_pct: 0.25         # 最大买卖价差百分比（25%）
+    min_open_interest: 3                 # 最小持仓量
+  
+  # 价格合理性
+  price_sanity:
+    min_total_premium: 0.002             # 最小Straddle总权利金
+    max_total_premium: 0.200             # 最大Straddle总权利金
+    
+# ============================================================================
+# VOLATILITY TRACKING - 波动率跟踪配置
+# ============================================================================
+
+vol_tracker_config:
+  # VolTracker参数（复用现有实现）
+  window_size: 96                        # 滚动窗口大小（2天的30分钟数据）
+  ewma_lambda: 0.94                      # EWMA衰减因子
+  min_periods: 20                        # 最小计算周期
+  annualization_factor: 17520            # 年化因子 (365*24*2 for 30min)
+  
+  # 数据更新频率
+  price_update_interval_minutes: 5       # 现货价格更新间隔（分钟）
+  vol_calculation_method: "ewma"         # 波动率计算方法：ewma 或 garch
+
+# ============================================================================
+# SEARCH PARAMETERS - 搜索参数
+# ============================================================================
+
+search_config:
+  # 数据源
+  data_source: "deribit"                 # 数据源：deribit
+  
+  # 搜索范围
+  currencies: ["BTC"]                    # 搜索币种（暂时只考虑BTC）
+  option_types: ["C", "P"]               # 期权类型：Call和Put都需要
+  
+  # 结果控制
+  max_results: 5                         # 最大返回结果数
+  sort_by: "iv_premium"                  # 排序方式：iv_premium, total_premium, score
+  sort_order: "desc"                     # 排序顺序：desc=降序
+  
+  # 评分权重（用于最佳Straddle选择）
+  scoring_weights:
+    iv_weight: 0.7                       # IV权重（70%）
+    premium_weight: 0.3                  # 权利金权重（30%）
+
+# ============================================================================
+# RISK MANAGEMENT - 风险管理
+# ============================================================================
+
+risk_management:
+  # 持仓限制
+  max_concurrent_straddles: 3            # 最大同时持有的Straddle数量
+  max_single_straddle_cost: 0.050        # 单个Straddle最大成本（BTC）
+  
+  # 止损条件
+  max_loss_pct: 0.50                     # 最大亏损百分比（50%）
+  profit_target_pct: 0.30                # 盈利目标百分比（30%）
+  
+  # Delta对冲（可选）
+  delta_hedge:
+    enabled: false                       # 是否启用Delta对冲
+    delta_threshold: 0.05                # Delta对冲阈值
+    hedge_ratio: 1.0                     # 对冲比例
+
+# ============================================================================
+# SIGNAL GENERATION - 信号生成
+# ============================================================================
+
+signal_config:
+  # 信号强度评估
+  signal_strength_thresholds:
+    weak_iv_premium: 0.05                # 弱信号：IV溢价5%
+    moderate_iv_premium: 0.08            # 中等信号：IV溢价8%
+    strong_iv_premium: 0.12              # 强信号：IV溢价12%
+  
+  # 信号过滤
+  min_signal_confidence: 0.6             # 最小信号置信度
+  signal_cooldown_minutes: 30            # 信号冷却时间（分钟）
+
+# ============================================================================
+# MANAGER SETTINGS - 管理器设置
+# ============================================================================
+
+manager_settings:
+  # 检查频率
+  check_interval_seconds: 300            # 检查间隔（5分钟）
+  
+  # 历史记录
+  max_signal_history: 50                 # 最大信号历史记录数
+  max_opportunity_cache: 20              # 最大机会缓存数
+  
+  # 日志设置
+  logging_level: "INFO"                  # 日志级别
+  enable_detailed_logging: true          # 启用详细日志
+
+# ============================================================================
+# OUTPUT FORMAT - 输出格式
+# ============================================================================
+
+output_config:
+  # 显示选项
+  display:
+    show_market_data: true               # 显示市场数据
+    show_greeks: true                    # 显示希腊字母
+    show_volatility_analysis: true       # 显示波动率分析
+    
+  # 保存选项
+  save_results: true                     # 保存搜索结果
+  output_file: "selling_straddle_opportunities.json"  # 输出文件名
+  
+  # 通知选项（预留）
+  notifications:
+    enabled: false                       # 启用通知
+    webhook_url: ""                      # Webhook URL
+    min_signal_strength: "MODERATE"      # 最小通知信号强度
+
+# ============================================================================
+# ADVANCED SETTINGS - 高级设置（可选）
+# ============================================================================
+
+advanced_settings:
+  # 性能优化
+  parallel_processing: true             # 并行处理
+  max_workers: 4                        # 最大工作线程数
+  api_rate_limit_delay: 0.1             # API限速延迟（秒）
+  
+  # 数据缓存
+  cache_market_data: true               # 缓存市场数据
+  cache_ttl_seconds: 60                 # 缓存生存时间（秒）
+  
+  # 调试选项
+  debug_mode: false                     # 调试模式
+  save_debug_data: false                # 保存调试数据
