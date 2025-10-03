@@ -308,7 +308,7 @@ class VolTracker:
 if __name__ == "__main__":
     # 测试波动率跟踪器
 
-    from qtrade.data_loader import ATMOptionsIterator
+    from qtrade.simulation.data_loader.data_utils import ATMOptionsIterator
     
     # 1. 初始化
     data_folder = '/home/ubuntu/options_trading/data/okx_data_processor/options_geeks/fixed_options_with_iv_greeks'

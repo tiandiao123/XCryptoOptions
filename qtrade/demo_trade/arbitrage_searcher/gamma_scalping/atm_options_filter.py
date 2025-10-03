@@ -129,6 +129,7 @@ def _filter_straddle_options(instruments: List[Dict], spot_price: float, config:
                     ask=market_data.get("best_ask", 0),
                     mid_price=market_data.get("mid_price", 0),
                     delta=market_data.get("greeks", {}).get("delta", 0),
+                    net_delta=market_data.get("greeks", {}).get("net_delta", 0),
                     gamma=market_data.get("greeks", {}).get("gamma", 0),
                     vega=market_data.get("greeks", {}).get("vega", 0),
                     theta=market_data.get("greeks", {}).get("theta", 0),
@@ -174,8 +175,15 @@ def _get_straddle_option_market_data(symbol: str, env: str = "testnet") -> Dict[
         
         # 解析希腊字母
         greeks_data = orderbook.get("greeks", {})
+        raw_delta = greeks_data.get("delta", 0)
+        
+        # 计算Net Delta近似值：当前Delta - 中间价对应的隐含Delta
+        # 这里用中间价作为市场隐含的Delta基准
+        net_delta_approx = raw_delta - mid_price if mid_price > 0 else raw_delta
+        
         greeks = {
-            "delta": greeks_data.get("delta", 0),
+            "delta": raw_delta,  # 保留原始Delta
+            "net_delta": net_delta_approx,  # 添加Net Delta近似值
             "gamma": greeks_data.get("gamma", 0),
             "vega": greeks_data.get("vega", 0),
             "theta": greeks_data.get("theta", 0),
@@ -417,17 +425,18 @@ if __name__ == "__main__":
             print(f"      🔵 Call: {call.symbol}")
             print(f"         执行价: ${call.strike:,.0f} | 到期: {call.days_to_expiry}天 | IV: {call.iv:.1%}")
             print(f"         价格: Bid={call.bid:.4f}, Ask={call.ask:.4f}, Mid={call.mid_price:.4f}")
-            print(f"         希腊字母: Δ={call.delta:.3f}, Γ={call.gamma:.3f}, Θ={call.theta:.3f}")
+            print(f"         希腊字母: Δ={call.delta:.3f}, Net Δ={call.net_delta:.3f}, Γ={call.gamma:.3f}, Θ={call.theta:.3f}")
             
             print(f"      🔴 Put:  {put.symbol}")
             print(f"         执行价: ${put.strike:,.0f} | 到期: {put.days_to_expiry}天 | IV: {put.iv:.1%}")
             print(f"         价格: Bid={put.bid:.4f}, Ask={put.ask:.4f}, Mid={put.mid_price:.4f}")
-            print(f"         希腊字母: Δ={put.delta:.3f}, Γ={put.gamma:.3f}, Θ={put.theta:.3f}")
+            print(f"         希腊字母: Δ={put.delta:.3f}, Net Δ={put.net_delta:.3f}, Γ={put.gamma:.3f}, Θ={put.theta:.3f}")
             
             print(f"      💰 Straddle总览:")
             print(f"         总权利金: {total_premium:.4f} BTC")
             print(f"         平均IV: {avg_iv:.1%}")
             print(f"         净Delta: {call.delta + put.delta:.3f}")
+            print(f"         净Net Delta: {call.net_delta + put.net_delta:.3f}")
             print(f"         总Gamma: {call.gamma + put.gamma:.3f}")
             print(f"         总Theta: {call.theta + put.theta:.3f}")
             print(f"         持仓量: Call={call.open_interest}, Put={put.open_interest}")

@@ -24,6 +24,7 @@ class OptionData:
     ask: float
     mid_price: float
     delta: float
+    net_delta: float  # 添加Net Delta近似值
     gamma: float
     vega: float
     theta: float
@@ -51,6 +52,7 @@ class OptionData:
         print(f"   🏛️ 持仓量: {self.open_interest}")
         print(f"   📊 希腊字母:")
         print(f"      Delta (Δ): {self.delta:+.3f}")
+        print(f"      Net Delta: {self.net_delta:+.3f}")
         print(f"      Gamma (Γ): {self.gamma:+.3f}")
         print(f"      Vega (ν):  {self.vega:+.3f}")
         print(f"      Theta (Θ): {self.theta:+.3f}")
@@ -141,6 +143,7 @@ def get_atm_options(config: Dict[str, Any], currency: str = "BTC", env: str = "t
                         ask=market_data.get("best_ask", 0),
                         mid_price=market_data.get("mid_price", 0),
                         delta=market_data.get("greeks", {}).get("delta", 0),
+                        net_delta=market_data.get("greeks", {}).get("net_delta", 0),
                         gamma=market_data.get("greeks", {}).get("gamma", 0),
                         vega=market_data.get("greeks", {}).get("vega", 0),
                         theta=market_data.get("greeks", {}).get("theta", 0),
@@ -181,6 +184,7 @@ def get_option_market_data(symbol: str, env: str = "testnet") -> Dict[str, Any]:
             "depth": 1
         })
 
+
         
         # 解析订单簿 - 直接从orderbook获取所有数据
         best_bid = orderbook.get("best_bid_price", 0)
@@ -189,8 +193,15 @@ def get_option_market_data(symbol: str, env: str = "testnet") -> Dict[str, Any]:
         
         # 解析希腊字母 - 直接从orderbook获取
         greeks_data = orderbook.get("greeks", {})
+        raw_delta = greeks_data.get("delta", 0)
+        
+        # 计算Net Delta近似值：当前Delta - 中间价对应的隐含Delta
+        # 这里用中间价作为市场隐含的Delta基准
+        net_delta_approx = raw_delta - mid_price if mid_price > 0 else raw_delta
+        
         greeks = {
-            "delta": greeks_data.get("delta", 0),
+            "delta": raw_delta,  # 保留原始Delta
+            "net_delta": net_delta_approx,  # 添加Net Delta近似值
             "gamma": greeks_data.get("gamma", 0),
             "vega": greeks_data.get("vega", 0),
             "theta": greeks_data.get("theta", 0),
@@ -221,7 +232,8 @@ def test_get_atm_options():
     """测试获取ATM期权功能"""
     
     # 加载配置
-    with open("calendar_spread.yaml", "r", encoding="utf-8") as f:
+    config_path = "/home/ubuntu/options_trading/qtrade/demo_trade/arbitrage_searcher/calendar_spread/calendar_spread.yaml"
+    with open(config_path, "r", encoding="utf-8") as f:
         config = yaml.safe_load(f)
     
     # 获取ATM期权
@@ -236,7 +248,7 @@ def test_get_atm_options():
         print(f"  执行价: ${option.strike:,.0f} | 类型: {option.option_type} | 到期: {option.days_to_expiry}天")
         print(f"  价格: Bid={option.bid:.4f}, Ask={option.ask:.4f}, Mid={option.mid_price:.4f}")
         print(f"  IV: {option.iv:.1%}")
-        print(f"  希腊字母: Δ={option.delta:.3f}, Γ={option.gamma:.3f}, Θ={option.theta:.3f}")
+        print(f"  希腊字母: Δ={option.delta:.3f}, Net Δ={option.net_delta:.3f}, Γ={option.gamma:.3f}, Θ={option.theta:.3f}")
 
 
 if __name__ == "__main__":

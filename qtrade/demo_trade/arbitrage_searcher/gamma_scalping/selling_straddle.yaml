@@ -7,14 +7,13 @@
 
 # Volatility Condition - 波动率条件
 volatility_criteria:
-  min_iv_premium: 0.05                    # 最小IV溢价：IV > RV + 5%
-  iv_premium_threshold: 0.05              # IV溢价阈值（5%）
+  min_iv_premium: 0.03                     # 最小IV溢价：IV > RV + 5%
   
 # Time to Expiration - 到期时间条件
 time_criteria:
   min_days_to_expiry: 7                   # 最小到期天数
-  max_days_to_expiry: 25                  # 最大到期天数 (Sweet spot for time decay)
-  optimal_days_range: [7, 20]            # 最优到期天数范围
+  max_days_to_expiry: 35                  # 最大到期天数 (Sweet spot for time decay)
+  optimal_days_range: [7, 25]            # 最优到期天数范围
   
 # Strike Selection - 执行价选择条件  
 strike_criteria:
@@ -28,7 +27,7 @@ strike_criteria:
 pairing_criteria:
   # Call/Put配对条件
   strike_match_tolerance: 0.005           # 执行价格匹配容忍度（0.5%）
-  expiry_match_tolerance_days: 1          # 到期时间匹配容忍度（1天）
+  expiry_match_tolerance_days: 0          # 到期时间匹配容忍度（Straddle必须完全相同的到期日）
   
   # 数据有效性检查
   min_iv: 0.01                           # 最小IV（1%）

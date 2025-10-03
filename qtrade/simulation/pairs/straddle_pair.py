@@ -2,7 +2,7 @@ import re
 import numpy as np
 import time
 from datetime import datetime, date
-from qtrade.simulate_tarde.data_loader.data_utils import get_option_open_price, get_option_full_info
+from qtrade.simulation.data_loader.data_utils import get_option_open_price, get_option_full_info
 
 
 def find_straddle_opportunity(atm_options, realized_vol=None, iv_threshold_pct=0.05):

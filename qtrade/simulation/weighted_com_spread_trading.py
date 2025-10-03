@@ -1,4 +1,4 @@
-from qtrade.simulate_tarde.spread_trading import backtest_strategy
+from qtrade.simulation.spread_trading import backtest_strategy
 # 📊 Import performance analysis functions
 import numpy as np
 import os

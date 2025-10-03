@@ -3,7 +3,7 @@ from datetime import datetime
 import sys
 import os
 
-from qtrade.simulate_tarde.data_loader.data_utils import (
+from qtrade.simulation.data_loader.data_utils import (
     get_sorted_dates_from_files, 
     get_intraday_30min_data, 
     get_atm_options_at_time,

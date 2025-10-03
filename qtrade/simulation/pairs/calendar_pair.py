@@ -657,7 +657,7 @@ class CalendarPair:
             
             # 如果ATM列表中没找到，使用data_utils函数
             if not long_info:
-                from qtrade.data_utils import get_option_full_info
+                from qtrade.simulation.data_loader.data_utils import get_option_full_info
                 long_info = get_option_full_info(
                     current_df, 
                     self.option_symbols['long_option'], 
@@ -666,7 +666,7 @@ class CalendarPair:
                 )
             
             if not short_info:
-                from qtrade.data_utils import get_option_full_info
+                from qtrade.simulation.data_loader.data_utils import get_option_full_info
                 short_info = get_option_full_info(
                     current_df, 
                     self.option_symbols['short_option'], 
