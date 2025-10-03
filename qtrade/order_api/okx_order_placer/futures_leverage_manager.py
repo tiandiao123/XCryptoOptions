@@ -7,7 +7,7 @@ Handles getting and setting leverage for inverse perpetual contracts
 import os, time, json, hmac, base64, hashlib, requests
 from typing import Optional, Dict, Any, List
 
-from qtrade.demo_trade.order_placer import API_KEY, API_SECRET, API_PASSPHRASE
+from qtrade.order_api.okx_order_placer import API_KEY, API_SECRET, API_PASSPHRASE
 
 OKX_BASE_URL = "https://www.okx.com"
 SIM_HEADER = {"x-simulated-trading": "1"}  # route to DEMO

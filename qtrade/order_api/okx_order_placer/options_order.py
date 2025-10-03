@@ -10,7 +10,7 @@ from typing import Optional, Dict, Any, Union, List
 from datetime import datetime
 
 # Import authentication from __init__.py
-from qtrade.demo_trade.order_placer import API_KEY, API_SECRET, API_PASSPHRASE
+from qtrade.order_api.okx_order_placer import API_KEY, API_SECRET, API_PASSPHRASE
 
 OKX_BASE_URL = "https://www.okx.com"
 SIM_HEADER = {"x-simulated-trading": "1"}  # Demo trading header

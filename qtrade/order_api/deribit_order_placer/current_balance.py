@@ -9,14 +9,8 @@ import requests
 from typing import Literal, Dict, Any, List, Optional
 from datetime import datetime
 
-from qtrade.demo_trade.deribit_order_placer import api_config
+from qtrade.order_api.deribit_order_placer import api_config
 
-# # API credentials (from __init__.py)
-# api_config = {
-#     "grant_type": "client_credentials",
-#     "client_id": "Y1Dn2LBT",
-#     "client_secret": "BNRxchFAqHBFTI6m8tbKsVHbd1Zb-vO__ZFIY3u_lhY"
-# }
 
 DERIBIT_BASE = {
     "testnet": "https://test.deribit.com",
