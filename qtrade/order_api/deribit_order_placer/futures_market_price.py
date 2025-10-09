@@ -12,6 +12,37 @@ Env = Literal["testnet", "mainnet"]
 class DeribitAPIError(Exception):
     pass
 
+def get_index_price(currency: str, env: Env = "testnet") -> float:
+    """
+    获取指定币种的指数价格
+    
+    Args:
+        currency: "BTC" or "ETH"
+        env: "testnet" or "mainnet"
+    
+    Returns:
+        Index price as float
+    """
+    try:
+        base = DERIBIT_BASE[env]
+        url = f"{base}/api/v2/public/get_index_price"
+        
+        params = {"index_name": f"{currency.lower()}_usd"}
+        
+        resp = requests.get(url, params=params, timeout=10.0)
+        resp.raise_for_status()
+        data = resp.json()
+        
+        if "result" in data and "index_price" in data["result"]:
+            return float(data["result"]["index_price"])
+        else:
+            raise DeribitAPIError(f"Invalid response format: {data}")
+            
+    except Exception as e:
+        print(f"❌ Error getting index price for {currency}: {e}")
+        return 0.0
+
+
 def get_inverse_perp_usd_price(
     instrument: Instrument,
     env: Env = "testnet",
