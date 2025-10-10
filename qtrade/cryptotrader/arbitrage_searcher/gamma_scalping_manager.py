@@ -6,9 +6,8 @@ Gamma Scalping Manager - Selling Straddle机会监控管理器
 
 import time
 import threading
-import yaml
 from datetime import datetime, timedelta
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any
 import logging
 from dataclasses import dataclass
 
@@ -330,7 +329,7 @@ def test_gamma_scalping_manager():
     print("="*60)
     
     # 初始化管理器
-    manager = GammaScalpingManager(config_path="/home/ubuntu/options_trading/qtrade/demo_trade/arbitrage_searcher/gamma_scalping/selling_straddle.yaml",
+    manager = GammaScalpingManager(config_path="/home/ubuntu/options_trading/qtrade/cryptotrader/arbitrage_searcher/gamma_scalping/selling_straddle.yaml",
                                     env="testnet")
     
     # 测试单次检查

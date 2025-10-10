@@ -156,6 +156,9 @@ class SellingStraddleFinder:
         self.currency = currency
         self.env = env
         self.config = self._load_config(config_path)
+
+        print(self.config)
+        print(f"self.config['volatility_criteria']: {self.config['volatility_criteria']}")
         
         # 初始化EWMA波动率跟踪器
         self.vol_tracker = self._initialize_vol_tracker()
@@ -167,53 +170,43 @@ class SellingStraddleFinder:
     
     def _load_config(self, config_path: str) -> Dict[str, Any]:
         """加载配置文件"""
-        try:
-            with open(config_path, 'r', encoding='utf-8') as f:
-                config = yaml.safe_load(f)
-            print(f"✅ 配置文件加载成功: {config_path}")
-            return config
-        except Exception as e:
-            print(f"❌ 配置文件加载失败: {e}")
-            return {}
+        with open(config_path, 'r', encoding='utf-8') as f:
+            config = yaml.safe_load(f)
+        print(f"✅ 配置文件加载成功: {config_path}")
+        return config
     
     def _initialize_vol_tracker(self) -> Optional[RealDataEWMAVolTracker]:
         """初始化波动率跟踪器"""
-        try:
-            vol_config = self.config.get("vol_tracker_config", {})
-            
-            tracker = RealDataEWMAVolTracker(
-                symbol=f"{self.currency}USDT",
-                interval=vol_config.get("historical_data_interval_minutes", "30m"),
-                window_size=vol_config.get("window_size", 96),
-                ewma_lambda=vol_config.get("ewma_lambda", 0.94)
-            )
-            
-            if tracker.is_initialized:
-                print(f"✅ EWMA波动率跟踪器初始化成功")
-                return tracker
-            else:
-                print(f"❌ EWMA波动率跟踪器初始化失败")
-                return None
-                
-        except Exception as e:
-            print(f"❌ 波动率跟踪器初始化出错: {e}")
+
+        vol_config = self.config.get("vol_tracker_config", {})
+        
+        tracker = RealDataEWMAVolTracker(
+            symbol=f"{self.currency}USDT",
+            interval=vol_config.get("historical_data_interval_minutes", "30m"),
+            window_size=vol_config.get("window_size", 96),
+            ewma_lambda=vol_config.get("ewma_lambda", 0.94)
+        )
+        
+        if tracker.is_initialized:
+            print(f"✅ EWMA波动率跟踪器初始化成功")
+            return tracker
+        else:
+            print(f"❌ EWMA波动率跟踪器初始化失败")
             return None
+
     
     def get_realized_volatility(self) -> Optional[float]:
         """获取当前已实现波动率"""
         if not self.vol_tracker:
             return None
-        
-        try:
-            result = self.vol_tracker.predict()
-            if result['success']:
-                return result['realized_vol_annualized']
-            else:
-                print(f"⚠️ 获取已实现波动率失败: {result['error']}")
-                return None
-        except Exception as e:
-            print(f"❌ 获取已实现波动率出错: {e}")
+    
+        result = self.vol_tracker.predict()
+        if result['success']:
+            return result['realized_vol_annualized']
+        else:
+            print(f"⚠️ 获取已实现波动率失败: {result['error']}")
             return None
+
     
     def find_selling_straddle_opportunities(self) -> List[StraddleOpportunity]:
         """
@@ -409,14 +402,11 @@ def load_config_and_find_opportunities(config_path: str = None, currency: str = 
     if config_path is None:
         config_path = "/home/ubuntu/options_trading/qtrade/demo_trade/arbitrage_searcher/gamma_scalping/selling_straddle.yaml"
     
-    try:
-        finder = SellingStraddleFinder(config_path, currency, env)
-        opportunities = finder.find_selling_straddle_opportunities()
-        finder.display_opportunities(opportunities, detailed)
-        return opportunities
-    except Exception as e:
-        print(f"❌ 寻找机会失败: {e}")
-        return []
+    finder = SellingStraddleFinder(config_path, currency, env)
+    opportunities = finder.find_selling_straddle_opportunities()
+    finder.display_opportunities(opportunities, detailed)
+    return opportunities
+
 
 
 if __name__ == "__main__":

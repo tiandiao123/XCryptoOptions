@@ -1,6 +1,18 @@
 import time
+from datetime import datetime
+from typing import List, Union, Dict, Any
+from qtrade.cryptotrader.arbitrage_searcher.calendar_spread.calendar_spread_finder import CalendarSpreadOpportunity
 from qtrade.cryptotrader.arbitrage_searcher.calendar_spread_manager import CalendarSpreadManager
-from qtrade.cryptotrader.arbitrage_searcher.gamma_scalping_manager import GammaScalpingSellStraddleManager
+from qtrade.cryptotrader.arbitrage_searcher.gamma_scalping.selling_straddle_finder import StraddleOpportunity
+from qtrade.cryptotrader.arbitrage_searcher.gamma_scalping_manager import GammaScalpingManager
+
+# 导入期权下单API
+from qtrade.cryptotrader.trading_engine.risk_manager import RiskManager
+from qtrade.order_api.deribit_order_placer.options_order import (
+    place_options_market_order,
+    place_options_limit_order,
+    place_options_market_order_btc_notional
+)
 
 
 class TradingEngine:
@@ -8,15 +20,23 @@ class TradingEngine:
                  calendar_config_path: str, 
                  gamma_scalping_config_path: str,
                  env: str = "testnet", 
-                 max_open_calendar: int = 1, 
-                 max_open_gamma_scalping: int = 1):
+                 max_open_calendar: int = 1, # Calendar Spread最大持仓数量
+                 max_open_gamma_scalping: int = 1, # Gamma Scalping最大持仓数量
+                 enable_delta_hedge: bool = True):
+        """
+        Args:
+            calendar_config_path: Calendar Spread配置文件路径
+            gamma_scalping_config_path: Gamma Scalping配置文件路径
+            env: 交易环境 (testnet/mainnet)
+            max_open_calendar: 最大持仓数量 Calendar Spread
+            max_open_gamma_scalping: 最大持仓数量 Gamma Scalping
+            enable_delta_hedge: 是否启用Delta对冲   
+        """
         self.env = env 
         self.calendar_spread_manager = CalendarSpreadManager(calendar_config_path, env)
-        self.gamma_scalping_sell_straddle_manager = GammaScalpingSellStraddleManager(gamma_scalping_config_path, env)
+        self.gamma_scalping_manager = GammaScalpingManager(gamma_scalping_config_path, env)
 
-
-        self.calendar_opportunities = []
-        self.gamma_scalping_opportunities = []
+        self.risk_manager = RiskManager(max_positions=max_open_calendar + max_open_gamma_scalping, enable_delta_hedge=enable_delta_hedge)
     
     def _transform_check_durantion(self, check_durantion: str):
         if check_durantion == "5min":
@@ -28,28 +48,273 @@ class TradingEngine:
         elif check_durantion == "30min":
             check_durantion = 1800
         return check_durantion
+    
 
-    def run_loop(self, check_durantion: str = "5min"):
+    def _ranking_opportunities(self, opportunities: Union[List[CalendarSpreadOpportunity], List[StraddleOpportunity]]):
+        """
+        对机会进行排序并返回最佳机会
+        
+        排序规则:
+        - StraddleOpportunity: 按 iv_premium (IV - realized_vol) 降序排序
+        - CalendarSpreadOpportunity: 按 iv_spread (short-term-iv - long-term-iv) 降序排序
+        
+        Args:
+            opportunities: 机会列表
+            
+        Returns:
+            最佳机会，如果列表为空则返回None
+        """
+        if not opportunities:
+            return None
+        
+        # 检查机会类型并进行相应排序
+        if isinstance(opportunities[0], StraddleOpportunity):
+            # StraddleOpportunity: 按 iv_premium 降序排序
+            sorted_opportunities = sorted(
+                opportunities, 
+                key=lambda x: x.iv_premium,  # IV - realized_vol
+                reverse=True  # 降序，最大的在前面
+            )
+            
+            print(f"🎯 Straddle机会排序完成:")
+            for i, opp in enumerate(sorted_opportunities[:3], 1):  # 显示前3个
+                print(f"   #{i}: ${opp.strike_price:,.0f} IV溢价={opp.iv_premium:.4f} "
+                      f"(IV={opp.avg_iv:.4f} - RV={opp.realized_vol:.4f})")
+            
+        elif isinstance(opportunities[0], CalendarSpreadOpportunity):  # CalendarSpreadOpportunity
+            # CalendarSpreadOpportunity: 按 iv_spread 降序排序
+            sorted_opportunities = sorted(
+                opportunities,
+                key=lambda x: x.iv_spread,  # short-term-iv - long-term-iv
+                reverse=True  # 降序，最大的在前面
+            )
+            
+            print(f"🎯 Calendar Spread机会排序完成:")
+            for i, opp in enumerate(sorted_opportunities[:3], 1):  # 显示前3个
+                print(f"   #{i}: ${opp.short_option.strike_price:,.0f} IV价差={opp.iv_spread:.4f} "
+                      f"时间间隔={opp.time_gap_days}天")
+        
+        else:
+            raise ValueError(f"Unknown opportunity type: {type(opportunities[0])}")
+        
+        # 返回最佳机会
+        best_opportunity = sorted_opportunities[0]
+        
+        if isinstance(best_opportunity, StraddleOpportunity):
+            print(f"✅ 最佳Straddle机会: ${best_opportunity.strike_price:,.0f} "
+                  f"IV溢价={best_opportunity.iv_premium:.4f}")
+        elif hasattr(best_opportunity, 'iv_spread'):
+            print(f"✅ 最佳Calendar机会: ${best_opportunity.short_option.strike_price:,.0f} "
+                  f"IV价差={best_opportunity.iv_spread:.4f}")
+        
+        return best_opportunity 
+    
+
+    def _place_option_order(self, 
+                            opportunity: Union[StraddleOpportunity, CalendarSpreadOpportunity], 
+                            order_type: str = "market", 
+                            amount: float = 1.0) -> Dict[str, Any]:
+        """
+        下期权订单
+        
+        Args:
+            opportunity: StraddleOpportunity or CalendarSpreadOpportunity
+            order_type: "market", "limit"
+            amount: 合约数量 (默认1.0张, Deribit中1 BTC = 1 contract, 支持0.1合约)
+            
+        Returns:
+            Dict with order results
+        """
+        assert order_type in ["market", "limit"], "order_type must be market or limit"
+        assert amount > 0, "amount must be positive"
+
+        order_results = []
+        
+        if isinstance(opportunity, StraddleOpportunity):
+            print(f"🎯 执行Straddle交易: ${opportunity.strike_price:,.0f}")
+            print(f"   策略: {opportunity.strategy_type}")
+            print(f"   合约数量: {amount}")
+            print(f"   订单类型: {order_type}")
+            
+            call_option = opportunity.call_option
+            put_option = opportunity.put_option
+            
+            if order_type == "market":
+                # Selling Straddle: 卖出Call和Put
+                print(f"📤 卖出Call: {call_option.symbol}")
+                call_result = place_options_market_order_btc_notional(
+                    instrument=call_option.symbol,
+                    side="sell",
+                    contracts=amount,
+                    reduce_only=False,
+                    env=self.env
+                )
+                order_results.append({"type": "call", "side": "sell", "result": call_result})
+                
+                print(f"📤 卖出Put: {put_option.symbol}")
+                put_result = place_options_market_order_btc_notional(
+                    instrument=put_option.symbol,
+                    side="sell", 
+                    contracts=amount,
+                    reduce_only=False,
+                    env=self.env
+                )
+                order_results.append({"type": "put", "side": "sell", "result": put_result})
+                
+            elif order_type == "limit":
+                # TODO: 实现限价单逻辑
+                print("⚠️ 限价单功能待实现")
+                return {"success": False, "error": "Limit order not implemented yet"}
+                
+        elif isinstance(opportunity, CalendarSpreadOpportunity):
+            print(f"🎯 执行Calendar Spread交易:")
+            print(f"   短期期权: {opportunity.short_option.symbol}")
+            print(f"   长期期权: {opportunity.long_option.symbol}")
+            print(f"   IV价差: {opportunity.iv_spread:.4f}")
+            print(f"   合约数量: {amount}")
+            print(f"   订单类型: {order_type}")
+            
+            short_option = opportunity.short_option
+            long_option = opportunity.long_option
+            
+            if order_type == "market":
+                # Calendar Spread: 卖出短期，买入长期
+                print(f"📤 卖出短期期权: {short_option.symbol}")
+                short_result = place_options_market_order_btc_notional(
+                    instrument=short_option.symbol,
+                    side="sell",
+                    contracts=amount,
+                    reduce_only=False,
+                    env=self.env
+                )
+                order_results.append({"type": "short", "side": "sell", "result": short_result})
+                
+                print(f"📥 买入长期期权: {long_option.symbol}")
+                long_result = place_options_market_order_btc_notional(
+                    instrument=long_option.symbol,
+                    side="buy",
+                    contracts=amount,
+                    reduce_only=False,
+                    env=self.env
+                )
+                order_results.append({"type": "long", "side": "buy", "result": long_result})
+                
+            elif order_type == "limit":
+                # TODO: 实现限价单逻辑
+                print("⚠️ 限价单功能待实现")
+                return {"success": False, "error": "Limit order not implemented yet"}
+        
+        # 汇总结果
+        success_count = sum(1 for order in order_results if order["result"].get("success", False))
+        total_orders = len(order_results)
+        
+        result = {
+            "success": success_count == total_orders,
+            "total_orders": total_orders,
+            "successful_orders": success_count,
+            "failed_orders": total_orders - success_count,
+            "order_details": order_results,
+            "opportunity_type": type(opportunity).__name__,
+            "strategy_info": {
+                "strike_price": getattr(opportunity, 'strike_price', 
+                                      getattr(opportunity.short_option, 'strike', 0) if hasattr(opportunity, 'short_option') else 0),
+                "amount": amount,
+                "order_type": order_type
+            }
+        }
+        
+        if result["success"]:
+            print(f"✅ 所有订单执行成功 ({success_count}/{total_orders})")
+        else:
+            print(f"❌ 部分订单执行失败 ({success_count}/{total_orders})")
+            for order in order_results:
+                if not order["result"].get("success", False):
+                    print(f"   失败订单: {order['type']} {order['side']} - {order['result'].get('error', 'Unknown error')}")
+            
+        return result
+
+    def run_loop(self, check_durantion: str = "5min", order_type: str = "market"):
+        """
+        主交易循环
+        
+        Args:
+            check_durantion: "5min", "10min", "15min", "30min"
+            order_type: "market", "limit"
+        """
         
         assert check_durantion in ["5min", "10min", "15min", "30min"], "check_durantion must be 5min, 10min, 15min or 30min"
         check_durantion = self._transform_check_durantion(check_durantion)
 
+        print(f"🚀 启动交易引擎循环")
+        print(f"   检查间隔: {check_durantion}秒")
+        print(f"   订单类型: {order_type}")
+        print(f"   最大Calendar持仓: {self.max_open_calendar}")
+        print(f"   最大Gamma Scalping持仓: {self.max_open_gamma_scalping}")
+
         while True:
-            calendar_opportunities = self.calendar_spread_manager.check_opportunities()
-            gamma_scalping_opportunities = self.gamma_scalping_sell_straddle_manager.check_opportunities()
-            
-            if len(self.calendar_opportunities) < self.max_open_calendar: 
-                if calendar_opportunities is not None and len(calendar_opportunities) > 0:
-                    # open calendar opportunities   
-                    pass 
+            try:
+                print(f"\n🔍 [{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 检查交易机会...")
+                
+                # 检查机会
+                calendar_opportunities = self.calendar_spread_manager.check_opportunities()
+                gamma_scalping_opportunities = self.gamma_scalping_manager.check_opportunities()
+                
+                # 处理Calendar Spread机会
+                if len(self.calendar_opportunities) < self.max_open_calendar: 
+                    if calendar_opportunities and len(calendar_opportunities) > 0:
+                        print(f"📊 发现 {len(calendar_opportunities)} 个Calendar Spread机会")
+                        best_calendar_opportunity = self._ranking_opportunities(calendar_opportunities)
+                        
+                        if best_calendar_opportunity:
+                            print(f"🎯 执行最佳Calendar Spread机会")
+                            order_result = self._place_option_order(best_calendar_opportunity, order_type)
+                            
+                            if order_result["success"]:
+                                self.risk_manager.add_position(best_calendar_opportunity)
+                                print(f"✅ Calendar Spread交易成功，当前持仓: {len(self.calendar_opportunities)}")
+                            else:
+                                print(f"❌ Calendar Spread交易失败")
+                    else:
+                        print("📊 未发现Calendar Spread机会")
+                else:
+                    print(f"📊 Calendar Spread持仓已满 ({len(self.calendar_opportunities)}/{self.max_open_calendar})")
 
-            if len(self.gamma_scalping_opportunities) < self.max_open_gamma_scalping:
-                if gamma_scalping_opportunities is not None and len(gamma_scalping_opportunities) > 0:
-                    # open gamma scalping opportunities
-                    pass 
+                # 处理Gamma Scalping机会
+                if len(self.gamma_scalping_opportunities) < self.max_open_gamma_scalping:
+                    if gamma_scalping_opportunities and len(gamma_scalping_opportunities) > 0:
+                        print(f"📊 发现 {len(gamma_scalping_opportunities)} 个Gamma Scalping机会")
+                        best_gamma_scalping_opportunity = self._ranking_opportunities(gamma_scalping_opportunities)
+                        
+                        if best_gamma_scalping_opportunity:
+                            print(f"🎯 执行最佳Gamma Scalping机会")
+                            order_result = self._place_option_order(best_gamma_scalping_opportunity, order_type)
+                            
+                            if order_result["success"]:
+                                self.risk_manager.add_position(best_gamma_scalping_opportunity)
+                                print(f"✅ Gamma Scalping交易成功，当前持仓: {len(self.gamma_scalping_opportunities)}")
+                            else:
+                                print(f"❌ Gamma Scalping交易失败")
+                    else:
+                        print("📊 未发现Gamma Scalping机会")
+                else:
+                    print(f"📊 Gamma Scalping持仓已满 ({len(self.gamma_scalping_opportunities)}/{self.max_open_gamma_scalping})")
 
-            
-            time.sleep(check_durantion)
+                # 检查是否需要平仓
+                self.check_close()
+                
+                # 记录PnL
+                self.record_pnl()
+                
+                print(f"⏰ 等待 {check_durantion} 秒后进行下次检查...")
+                time.sleep(check_durantion)
+                
+            except KeyboardInterrupt:
+                print("\n🛑 收到中断信号，停止交易循环")
+                break
+            except Exception as e:
+                print(f"❌ 交易循环出错: {e}")
+                print("⏰ 等待60秒后继续...")
+                time.sleep(60)
     
     def check_close(self):
         pass 

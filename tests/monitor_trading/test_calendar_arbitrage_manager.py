@@ -12,11 +12,12 @@ import json
 from datetime import datetime, timedelta
 from pathlib import Path
 
+from qtrade.cryptotrader.arbitrage_searcher.calendar_spread_manager import CalendarArbitrageManager
+
 # 添加项目路径
 project_root = Path(__file__).parent.parent.parent
 sys.path.append(str(project_root))
 
-from qtrade.demo_trade.arbitrage_searcher.calendar_spread_manager import CalendarArbitrageManager
 
 
 class WeeklyMonitor:

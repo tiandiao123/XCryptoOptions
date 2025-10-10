@@ -10,10 +10,11 @@ import threading
 from datetime import datetime, timedelta
 from pathlib import Path
 
+from qtrade.cryptotrader.arbitrage_searcher.gamma_scalping.ewma_vol_tracker import RealDataEWMAVolTracker
+
 # 添加项目路径
 sys.path.append('/home/ubuntu/options_trading')
 
-from qtrade.demo_trade.arbitrage_searcher.gamma_scalping.ewma_vol_tracker import RealDataEWMAVolTracker
 
 
 class RealTimeVolTrackerTest:
