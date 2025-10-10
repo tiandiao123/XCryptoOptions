@@ -2,13 +2,13 @@
 import os, time, json, hmac, base64, hashlib, argparse, requests
 from typing import Optional, Dict, Any
 
-from qtrade.demo_trade.order_placer.utils import get_current_btc_price, get_instrument_details
+from qtrade.order_api.okx_order_placer.utils import get_current_btc_price, get_instrument_details
 
 OKX_BASE_URL = "https://www.okx.com"  # demo vs live decided by header
 SIM_HEADER = {"x-simulated-trading": "1"}  # route to DEMO
 
 
-from qtrade.demo_trade.order_placer import API_KEY, API_SECRET, API_PASSPHRASE
+from qtrade.order_api.okx_order_placer import API_KEY, API_SECRET, API_PASSPHRASE
 
 
 def rfc3339():

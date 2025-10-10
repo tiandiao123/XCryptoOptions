@@ -10,7 +10,7 @@ import os
 import time
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-from qtrade.demo_trade.deribit_order_placer.options_order import (
+from qtrade.order_api.deribit_order_placer.options_order import (
     get_options_instruments,
     get_options_orderbook,
     place_options_limit_order,
@@ -264,7 +264,6 @@ def main():
     else:
         results["relative_order"] = False
     
-    exit(0)
     
     # Test 6: Positions and orders
     results["positions_orders"] = test_options_positions_and_orders()

@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import List, Dict, Any
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from qtrade.demo_trade.deribit_order_placer.options_orderbook import (
+from qtrade.order_api.deribit_order_placer.options_orderbook import (
     get_index_price,
     list_live_options,
     _get,
