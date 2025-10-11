@@ -11,7 +11,7 @@ from datetime import datetime
 import time
 
 # Import API credentials
-from qtrade.order_api.deribit_order_placer import api_config
+from qtrade.order_api.deribit_order_placer import api_config, real_api_config
 
 DERIBIT_BASE = {
     "testnet": "https://test.deribit.com",
@@ -33,8 +33,11 @@ def get_access_token(env: Env = "testnet") -> str:
     """
     base = DERIBIT_BASE[env]
     url = f"{base}/api/v2/public/auth"
+    if env == "mainnet":
+        response = requests.get(url, params=real_api_config)
+    else:
+        response = requests.get(url, params=api_config)
     
-    response = requests.get(url, params=api_config)
     response.raise_for_status()
     
     data = response.json()

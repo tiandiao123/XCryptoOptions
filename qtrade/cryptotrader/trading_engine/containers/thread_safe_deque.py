@@ -174,7 +174,19 @@ class ThreadSafeArrayDeque:
         """原子快照（从队首到队尾）。"""
         with self._lock:
             return [self._data[(self._head + i) % self._cap] for i in range(self._size)]
+    
+    def __setitem__(self, index: int, value: Any) -> None:
+        """O(1) 原位替换，支持负索引；不改变 size。"""
+        with self._lock:
+            pos = self._index(index)   # 复用你的范围检查与映射
+            self._data[pos] = value
 
+    def __iter__(self):
+        """基于快照的无锁迭代（创建时持锁拷贝，之后不再持锁）。"""
+        with self._lock:
+            snap = [self._data[(self._head + i) % self._cap] for i in range(self._size)]
+        return iter(snap)
+    
     # 便捷属性
     def is_empty(self) -> bool:
         with self._lock:
@@ -221,11 +233,31 @@ if __name__ == "__main__":
     for ele in curent_deque:
         print(ele)
 
+    
+    print("new test: ")
+    q = ThreadSafeArrayDeque(capacity=4, max_capacity=4)
+    for i in range(4):
+        q.append(i)              # [0,1,2,3]
+    print("init:", q.to_list())
 
-    print("check getitem full raise error")
-    for i in range(10):
-        curent_deque.append(i)
+    # 直接索引读取
+    print("q[2] =", q[2])        # 2
+    print("q[-1] =", q[-1])      # 3
 
+    # 直接索引赋值（原位替换）
+    q[1] = 100                   # [0,100,2,3]
+    print("after setitem:", q.to_list())
+
+    # 验证负索引赋值
+    q[-1] = 999                  # [0,100,2,999]
+    print("after negative set:", q.to_list())
+
+    # 验证基于快照的迭代
+    for x in q:
+        print("iter:", x)
+
+    q[2] = 1009
+    print("final:", q.to_list())
     
     
 

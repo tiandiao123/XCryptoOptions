@@ -23,6 +23,158 @@ class CalendarSpreadOpportunity:
     max_profit_potential: float  # 最大盈利潜力
     signal_strength: str      # 信号强度：WEAK, MODERATE, STRONG
 
+    open_status: bool = False  # 是否持仓
+    contracts: float = 0.0 # 持仓大小
+
+
+def update_calendar_spread_opportunity(opportunity: CalendarSpreadOpportunity,
+                                       realized_vol: float,
+                                       net_delta_only: bool = True,
+                                       env: str = "testnet"):
+    """
+    更新Calendar Spread机会的实时Greeks数据
+    
+    Args:
+        opportunity: 现有的CalendarSpreadOpportunity对象
+        realized_vol: 最新的实现波动率
+        net_delta_only: 如果为True，只返回combined net delta；如果为False，返回完整更新的对象
+        env: 交易环境 ("testnet" 或 "mainnet")
+    
+    Returns:
+        如果net_delta_only=True: float (combined net delta)
+        如果net_delta_only=False: CalendarSpreadOpportunity (更新后的完整对象)
+    """
+    try:
+        # 导入API函数
+        from qtrade.order_api.deribit_order_placer.options_orderbook import _get, DERIBIT_BASE
+        
+        # 获取最新的期权市场数据
+        def get_latest_option_data(symbol: str) -> Dict[str, Any]:
+            """获取单个期权的最新市场数据"""
+            try:
+                base = DERIBIT_BASE[env]
+                orderbook = _get(base, "public/get_order_book", {
+                    "instrument_name": symbol,
+                    "depth": 1
+                })
+                
+                # 解析订单簿数据
+                best_bid = orderbook.get("best_bid_price", 0)
+                best_ask = orderbook.get("best_ask_price", 0)
+                mid_price = (best_bid + best_ask) / 2 if best_bid > 0 and best_ask > 0 else 0
+                
+                # 解析希腊字母
+                greeks_data = orderbook.get("greeks", {})
+                raw_delta = greeks_data.get("delta", 0)
+                net_delta_approx = raw_delta - mid_price if mid_price > 0 else raw_delta
+                
+                return {
+                    "best_bid": best_bid,
+                    "best_ask": best_ask,
+                    "mid_price": mid_price,
+                    "mark_price": orderbook.get("mark_price", 0),
+                    "mark_iv": orderbook.get("mark_iv", 0) / 100,  # 转换为小数
+                    "open_interest": orderbook.get("open_interest", 0),
+                    "greeks": {
+                        "delta": raw_delta,
+                        "net_delta": net_delta_approx,
+                        "gamma": greeks_data.get("gamma", 0),
+                        "vega": greeks_data.get("vega", 0),
+                        "theta": greeks_data.get("theta", 0),
+                        "rho": greeks_data.get("rho", 0)
+                    }
+                }
+            except Exception as e:
+                print(f"⚠️ 获取{symbol}最新数据失败: {e}")
+                return None
+        
+        # 获取Short和Long期权的最新数据
+        short_data = get_latest_option_data(opportunity.short_option.symbol)
+        long_data = get_latest_option_data(opportunity.long_option.symbol)
+        
+        if not short_data or not long_data:
+            print("❌ 无法获取期权最新数据")
+            if net_delta_only:
+                # 返回原有的net delta (Calendar Spread的净Delta = Long Delta - Short Delta)
+                original_net_delta = opportunity.long_option.net_delta - opportunity.short_option.net_delta
+                return original_net_delta
+            else:
+                return opportunity  # 返回原对象
+        
+        # 如果只需要net delta，直接计算并返回
+        if net_delta_only:
+            short_net_delta = short_data["greeks"]["net_delta"]
+            long_net_delta = long_data["greeks"]["net_delta"]
+            # Calendar Spread Net Delta = 买入期权的Net Delta - 卖出期权的Net Delta
+            # 因为我们买入长期期权(+Delta)，卖出短期期权(-Delta)
+            combined_net_delta = long_net_delta - short_net_delta
+            
+            print(f"🔄 更新Calendar Spread Net Delta:")
+            print(f"   Short (卖出): {short_net_delta:.4f}")
+            print(f"   Long (买入): {long_net_delta:.4f}")
+            print(f"   Combined: {combined_net_delta:.4f}")
+            print(f"   对冲建议: {'做空标的' if combined_net_delta > 0 else '做多标的' if combined_net_delta < 0 else '无需对冲'}")
+            return combined_net_delta
+        
+        # 如果需要完整更新，直接更新原对象的属性
+        # 更新Short Option数据
+        opportunity.short_option.iv = short_data["mark_iv"]
+        opportunity.short_option.bid = short_data["best_bid"]
+        opportunity.short_option.ask = short_data["best_ask"]
+        opportunity.short_option.mid_price = short_data["mid_price"]
+        opportunity.short_option.delta = short_data["greeks"]["delta"]
+        opportunity.short_option.net_delta = short_data["greeks"]["net_delta"]
+        opportunity.short_option.gamma = short_data["greeks"]["gamma"]
+        opportunity.short_option.vega = short_data["greeks"]["vega"]
+        opportunity.short_option.theta = short_data["greeks"]["theta"]
+        opportunity.short_option.rho = short_data["greeks"]["rho"]
+        opportunity.short_option.open_interest = short_data["open_interest"]
+        
+        # 更新Long Option数据
+        opportunity.long_option.iv = long_data["mark_iv"]
+        opportunity.long_option.bid = long_data["best_bid"]
+        opportunity.long_option.ask = long_data["best_ask"]
+        opportunity.long_option.mid_price = long_data["mid_price"]
+        opportunity.long_option.delta = long_data["greeks"]["delta"]
+        opportunity.long_option.net_delta = long_data["greeks"]["net_delta"]
+        opportunity.long_option.gamma = long_data["greeks"]["gamma"]
+        opportunity.long_option.vega = long_data["greeks"]["vega"]
+        opportunity.long_option.theta = long_data["greeks"]["theta"]
+        opportunity.long_option.rho = long_data["greeks"]["rho"]
+        opportunity.long_option.open_interest = long_data["open_interest"]
+        
+        # 重新计算Calendar Spread衍生属性
+        opportunity.iv_spread = opportunity.short_option.iv - opportunity.long_option.iv
+        opportunity.iv_spread_pct = (opportunity.iv_spread / opportunity.long_option.iv) if opportunity.long_option.iv > 0 else 0
+        opportunity.net_premium = opportunity.short_option.mid_price - opportunity.long_option.mid_price  # 卖出收入 - 买入成本
+        opportunity.time_gap_days = opportunity.long_option.days_to_expiry - opportunity.short_option.days_to_expiry
+        
+        # 重新计算最大盈利潜力（简化版）
+        opportunity.max_profit_potential = abs(opportunity.net_premium) * 0.5  # 简化计算
+        
+        # 重新评估信号强度
+        opportunity.signal_strength = _evaluate_signal_strength(
+            opportunity.iv_spread, opportunity.iv_spread_pct, opportunity.time_gap_days
+        )
+        
+        print(f"✅ 完整更新Calendar Spread机会 (in-place):")
+        print(f"   Combined Net Delta: {opportunity.long_option.net_delta - opportunity.short_option.net_delta:.4f}")
+        print(f"   IV Spread: {opportunity.iv_spread:.4f} ({opportunity.iv_spread_pct:+.1%})")
+        print(f"   Net Premium: {opportunity.net_premium:.4f}")
+        print(f"   Signal Strength: {opportunity.signal_strength}")
+        print(f"   对冲建议: {'做空标的' if (opportunity.long_option.net_delta - opportunity.short_option.net_delta) > 0 else '做多标的' if (opportunity.long_option.net_delta - opportunity.short_option.net_delta) < 0 else '无需对冲'}")
+        
+        return opportunity
+        
+    except Exception as e:
+        print(f"❌ 更新Calendar Spread机会失败: {e}")
+        if net_delta_only:
+            # 返回原有的net delta
+            original_net_delta = opportunity.long_option.net_delta - opportunity.short_option.net_delta
+            return original_net_delta
+        else:
+            return opportunity 
+
 
 def find_calendar_spread_options(atm_options: List[OptionData], config: Dict[str, Any]) -> List[CalendarSpreadOpportunity]:
     """

@@ -9,7 +9,7 @@ import requests
 from typing import Literal, Dict, Any, List, Optional
 from datetime import datetime
 
-from qtrade.order_api.deribit_order_placer import api_config
+from qtrade.order_api.deribit_order_placer import api_config, real_api_config
 
 
 DERIBIT_BASE = {
@@ -31,9 +31,12 @@ def get_access_token(env: Env = "testnet") -> str:
     base = DERIBIT_BASE[env]
     url = f"{base}/api/v2/public/auth"
     
-    response = requests.get(url, params=api_config)
+    if env == "mainnet":
+        response = requests.get(url, params=real_api_config)
+    else:
+        response = requests.get(url, params=api_config)
+        
     response.raise_for_status()
-    
     data = response.json()
     
     if data.get("error"):
