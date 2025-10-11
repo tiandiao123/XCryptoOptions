@@ -364,12 +364,13 @@ class CalendarArbitrageManager:
 # 便捷函数
 def create_manager(env: str = "testnet") -> CalendarArbitrageManager:
     """创建套利管理器"""
-    return CalendarArbitrageManager(env=env)
+    return CalendarArbitrageManager(env=env, 
+                                    config_path = "/home/ubuntu/options_trading/qtrade/cryptotrader/arbitrage_searcher/calendar_spread/calendar_spread.yaml")
 
 
 if __name__ == "__main__":
     # 测试用例
-    manager = create_manager("testnet")
+    manager = create_manager("mainnet")
     
     print("🚀 启动Calendar Arbitrage Manager测试...")
     

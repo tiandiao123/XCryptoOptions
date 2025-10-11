@@ -10,7 +10,8 @@ import os
 import time
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-from qtrade.demo_trade.deribit_order_placer.futures_order import (
+# /home/ubuntu/options_trading/qtrade/order_api/deribit_order_placer/futures_order.py
+from qtrade.order_api.deribit_order_placer.futures_order import (
     place_limit_order,
     cancel_order,
     get_order_status,
@@ -35,7 +36,7 @@ def test_simple_limit_order():
     print(f"💰 Current BTC price: ${current_price:,.2f}")
     
     # Place a limit order well below market (won't fill)
-    limit_price = 100000  # Fixed price like in working example
+    limit_price = 108000  # Fixed price like in working example
     
     print(f"\n📝 Placing limit buy order...")
     print(f"   Limit price: ${limit_price:,.2f}")
@@ -61,7 +62,7 @@ def test_simple_limit_order():
     print(f"   Order ID: {order_id}")
     
     # Wait a moment
-    time.sleep(12)
+    time.sleep(120)
     
     # Check order status
     print(f"\n🔍 Checking order status...")

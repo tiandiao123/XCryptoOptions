@@ -2,15 +2,13 @@ import time
 from datetime import datetime
 from typing import List, Union, Dict, Any
 from qtrade.cryptotrader.arbitrage_searcher.calendar_spread.calendar_spread_finder import CalendarSpreadOpportunity
-from qtrade.cryptotrader.arbitrage_searcher.calendar_spread_manager import CalendarSpreadManager
+from qtrade.cryptotrader.arbitrage_searcher.calendar_spread_manager import CalendarArbitrageManager
 from qtrade.cryptotrader.arbitrage_searcher.gamma_scalping.selling_straddle_finder import StraddleOpportunity
 from qtrade.cryptotrader.arbitrage_searcher.gamma_scalping_manager import GammaScalpingManager
 
 # 导入期权下单API
 from qtrade.cryptotrader.trading_engine.risk_manager import RiskManager
 from qtrade.order_api.deribit_order_placer.options_order import (
-    place_options_market_order,
-    place_options_limit_order,
     place_options_market_order_btc_notional
 )
 
@@ -33,7 +31,10 @@ class TradingEngine:
             enable_delta_hedge: 是否启用Delta对冲   
         """
         self.env = env 
-        self.calendar_spread_manager = CalendarSpreadManager(calendar_config_path, env)
+        self.max_open_calendar = max_open_calendar
+        self.max_open_gamma_scalping = max_open_gamma_scalping
+        
+        self.calendar_spread_manager = CalendarArbitrageManager(calendar_config_path, env)
         self.gamma_scalping_manager = GammaScalpingManager(gamma_scalping_config_path, env)
 
         self.risk_manager = RiskManager(max_positions=max_open_calendar + max_open_gamma_scalping, enable_delta_hedge=enable_delta_hedge)
@@ -224,6 +225,8 @@ class TradingEngine:
         }
         
         if result["success"]:
+            opportunity.open_status = True
+            opportunity.contracts = amount
             print(f"✅ 所有订单执行成功 ({success_count}/{total_orders})")
         else:
             print(f"❌ 部分订单执行失败 ({success_count}/{total_orders})")
@@ -260,7 +263,8 @@ class TradingEngine:
                 gamma_scalping_opportunities = self.gamma_scalping_manager.check_opportunities()
                 
                 # 处理Calendar Spread机会
-                if len(self.calendar_opportunities) < self.max_open_calendar: 
+                position_counts = self.risk_manager.get_position_count()
+                if position_counts["calendar_spread"] < self.max_open_calendar: 
                     if calendar_opportunities and len(calendar_opportunities) > 0:
                         print(f"📊 发现 {len(calendar_opportunities)} 个Calendar Spread机会")
                         best_calendar_opportunity = self._ranking_opportunities(calendar_opportunities)
@@ -271,16 +275,18 @@ class TradingEngine:
                             
                             if order_result["success"]:
                                 self.risk_manager.add_position(best_calendar_opportunity)
-                                print(f"✅ Calendar Spread交易成功，当前持仓: {len(self.calendar_opportunities)}")
+                                updated_counts = self.risk_manager.get_position_count()
+                                print(f"✅ Calendar Spread交易成功，当前持仓: {updated_counts['calendar_spread']}")
                             else:
                                 print(f"❌ Calendar Spread交易失败")
                     else:
                         print("📊 未发现Calendar Spread机会")
                 else:
-                    print(f"📊 Calendar Spread持仓已满 ({len(self.calendar_opportunities)}/{self.max_open_calendar})")
+                    print(f"📊 Calendar Spread持仓已满 ({position_counts['calendar_spread']}/{self.max_open_calendar})")
 
                 # 处理Gamma Scalping机会
-                if len(self.gamma_scalping_opportunities) < self.max_open_gamma_scalping:
+                position_counts = self.risk_manager.get_position_count()  # 重新获取最新计数
+                if position_counts["straddle"] < self.max_open_gamma_scalping:
                     if gamma_scalping_opportunities and len(gamma_scalping_opportunities) > 0:
                         print(f"📊 发现 {len(gamma_scalping_opportunities)} 个Gamma Scalping机会")
                         best_gamma_scalping_opportunity = self._ranking_opportunities(gamma_scalping_opportunities)
@@ -291,13 +297,14 @@ class TradingEngine:
                             
                             if order_result["success"]:
                                 self.risk_manager.add_position(best_gamma_scalping_opportunity)
-                                print(f"✅ Gamma Scalping交易成功，当前持仓: {len(self.gamma_scalping_opportunities)}")
+                                updated_counts = self.risk_manager.get_position_count()
+                                print(f"✅ Gamma Scalping交易成功，当前持仓: {updated_counts['straddle']}")
                             else:
                                 print(f"❌ Gamma Scalping交易失败")
                     else:
                         print("📊 未发现Gamma Scalping机会")
                 else:
-                    print(f"📊 Gamma Scalping持仓已满 ({len(self.gamma_scalping_opportunities)}/{self.max_open_gamma_scalping})")
+                    print(f"📊 Gamma Scalping持仓已满 ({position_counts['straddle']}/{self.max_open_gamma_scalping})")
 
                 # 检查是否需要平仓
                 self.check_close()

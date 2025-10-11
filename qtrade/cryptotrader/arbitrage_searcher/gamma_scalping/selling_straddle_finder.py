@@ -54,6 +54,9 @@ class StraddleOpportunity:
     # 评分
     score: float = 0.0
     signal_strength: str = "weak"
+
+    open_status: bool = False  # 是否持仓
+    contracts: float = 0.0 # 持仓大小
     
     def __post_init__(self):
         """计算衍生字段"""
@@ -140,6 +143,143 @@ class StraddleOpportunity:
         print(f"      希腊字母: Δ={self.put_option.delta:.3f}, Net Δ={self.put_option.net_delta:.3f}, Γ={self.put_option.gamma:.3f}, Θ={self.put_option.theta:.3f}")
         print(f"      IV: {self.put_option.iv:.1%}, 持仓量: {self.put_option.open_interest}")
 
+
+def update_straddle_opportunity(opportunity: StraddleOpportunity,
+                                realized_vol: float, 
+                                net_delta_only: bool = True,
+                                env: str = "testnet"):
+    """
+    更新Straddle机会的实时Greeks数据
+    
+    Args:
+        opportunity: 现有的StraddleOpportunity对象
+        realized_vol: 最新的实现波动率
+        net_delta_only: 如果为True，只返回combined net delta；如果为False，返回完整更新的对象
+        env: 交易环境 ("testnet" 或 "mainnet")
+    
+    Returns:
+        如果net_delta_only=True: float (combined net delta)
+        如果net_delta_only=False: StraddleOpportunity (更新后的完整对象)
+    """
+    try:
+        # 导入API函数
+        from qtrade.order_api.deribit_order_placer.options_orderbook import _get, DERIBIT_BASE
+        
+        # 获取最新的期权市场数据
+        def get_latest_option_data(symbol: str) -> Dict[str, Any]:
+            """获取单个期权的最新市场数据"""
+            try:
+                base = DERIBIT_BASE[env]
+                orderbook = _get(base, "public/get_order_book", {
+                    "instrument_name": symbol,
+                    "depth": 1
+                })
+                
+                # 解析订单簿数据
+                best_bid = orderbook.get("best_bid_price", 0)
+                best_ask = orderbook.get("best_ask_price", 0)
+                mid_price = (best_bid + best_ask) / 2 if best_bid > 0 and best_ask > 0 else 0
+                
+                # 解析希腊字母
+                greeks_data = orderbook.get("greeks", {})
+                raw_delta = greeks_data.get("delta", 0)
+                net_delta_approx = raw_delta - mid_price if mid_price > 0 else raw_delta
+                
+                return {
+                    "best_bid": best_bid,
+                    "best_ask": best_ask,
+                    "mid_price": mid_price,
+                    "mark_price": orderbook.get("mark_price", 0),
+                    "mark_iv": orderbook.get("mark_iv", 0) / 100,  # 转换为小数
+                    "open_interest": orderbook.get("open_interest", 0),
+                    "greeks": {
+                        "delta": raw_delta,
+                        "net_delta": net_delta_approx,
+                        "gamma": greeks_data.get("gamma", 0),
+                        "vega": greeks_data.get("vega", 0),
+                        "theta": greeks_data.get("theta", 0),
+                        "rho": greeks_data.get("rho", 0)
+                    }
+                }
+            except Exception as e:
+                print(f"⚠️ 获取{symbol}最新数据失败: {e}")
+                return None
+        
+        # 获取Call和Put的最新数据
+        call_data = get_latest_option_data(opportunity.call_option.symbol)
+        put_data = get_latest_option_data(opportunity.put_option.symbol)
+        
+        if not call_data or not put_data:
+            print("❌ 无法获取期权最新数据")
+            if net_delta_only:
+                return opportunity.net_delta_adjusted  # 返回原有的net delta
+            else:
+                return opportunity  # 返回原对象
+        
+        # 如果只需要net delta，直接计算并返回
+        if net_delta_only:
+            call_net_delta = call_data["greeks"]["net_delta"]
+            put_net_delta = put_data["greeks"]["net_delta"]
+            combined_net_delta = call_net_delta + put_net_delta
+            
+            print(f"🔄 更新Net Delta: Call={call_net_delta:.4f}, Put={put_net_delta:.4f}, Combined={combined_net_delta:.4f}")
+            return combined_net_delta
+        
+        # 如果需要完整更新，直接更新原对象的属性
+        # 更新Call Option数据
+        opportunity.call_option.iv = call_data["mark_iv"]
+        opportunity.call_option.bid = call_data["best_bid"]
+        opportunity.call_option.ask = call_data["best_ask"]
+        opportunity.call_option.mid_price = call_data["mid_price"]
+        opportunity.call_option.delta = call_data["greeks"]["delta"]
+        opportunity.call_option.net_delta = call_data["greeks"]["net_delta"]
+        opportunity.call_option.gamma = call_data["greeks"]["gamma"]
+        opportunity.call_option.vega = call_data["greeks"]["vega"]
+        opportunity.call_option.theta = call_data["greeks"]["theta"]
+        opportunity.call_option.rho = call_data["greeks"]["rho"]
+        opportunity.call_option.open_interest = call_data["open_interest"]
+        
+        # 更新Put Option数据
+        opportunity.put_option.iv = put_data["mark_iv"]
+        opportunity.put_option.bid = put_data["best_bid"]
+        opportunity.put_option.ask = put_data["best_ask"]
+        opportunity.put_option.mid_price = put_data["mid_price"]
+        opportunity.put_option.delta = put_data["greeks"]["delta"]
+        opportunity.put_option.net_delta = put_data["greeks"]["net_delta"]
+        opportunity.put_option.gamma = put_data["greeks"]["gamma"]
+        opportunity.put_option.vega = put_data["greeks"]["vega"]
+        opportunity.put_option.theta = put_data["greeks"]["theta"]
+        opportunity.put_option.rho = put_data["greeks"]["rho"]
+        opportunity.put_option.open_interest = put_data["open_interest"]
+        
+        # 更新实现波动率
+        opportunity.realized_vol = realized_vol
+        
+        # 重新计算衍生属性 (这些在StraddleOpportunity.__post_init__中计算)
+        opportunity.net_delta = opportunity.call_option.delta + opportunity.put_option.delta
+        opportunity.net_delta_adjusted = opportunity.call_option.net_delta + opportunity.put_option.net_delta
+        opportunity.total_gamma = opportunity.call_option.gamma + opportunity.put_option.gamma
+        opportunity.total_theta = opportunity.call_option.theta + opportunity.put_option.theta
+        opportunity.total_vega = opportunity.call_option.vega + opportunity.put_option.vega
+        opportunity.avg_iv = (opportunity.call_option.iv + opportunity.put_option.iv) / 2
+        opportunity.iv_premium = opportunity.avg_iv - opportunity.realized_vol
+        opportunity.iv_premium_pct = opportunity.iv_premium * 100
+        opportunity.total_premium = opportunity.call_option.mid_price + opportunity.put_option.mid_price
+        
+        print(f"✅ 完整更新Straddle机会 (in-place):")
+        print(f"   Combined Net Delta: {opportunity.net_delta_adjusted:.4f}")
+        print(f"   Total Gamma: {opportunity.total_gamma:.4f}")
+        print(f"   Total Theta: {opportunity.total_theta:.4f}")
+        print(f"   IV Premium: {opportunity.iv_premium_pct:+.1f}%")
+        
+        return opportunity
+        
+    except Exception as e:
+        print(f"❌ 更新Straddle机会失败: {e}")
+        if net_delta_only:
+            return opportunity.net_delta_adjusted if hasattr(opportunity, 'net_delta_adjusted') else opportunity.net_delta
+        else:
+            return opportunity 
 
 class SellingStraddleFinder:
     """Selling Straddle机会寻找器"""

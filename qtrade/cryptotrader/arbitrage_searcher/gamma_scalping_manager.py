@@ -330,7 +330,7 @@ def test_gamma_scalping_manager():
     
     # 初始化管理器
     manager = GammaScalpingManager(config_path="/home/ubuntu/options_trading/qtrade/cryptotrader/arbitrage_searcher/gamma_scalping/selling_straddle.yaml",
-                                    env="testnet")
+                                    env="mainnet")
     
     # 测试单次检查
     print("\n🔍 测试单次机会检查...")
