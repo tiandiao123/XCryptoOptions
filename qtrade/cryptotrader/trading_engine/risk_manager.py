@@ -1,7 +1,7 @@
 
 
 from collections import deque
-from typing import Any, Dict, Union
+from typing import Any, Dict, Union, Tuple
 import logging
 
 from qtrade.cryptotrader.arbitrage_searcher.gamma_scalping.selling_straddle_finder import StraddleOpportunity
@@ -12,7 +12,8 @@ from qtrade.cryptotrader.arbitrage_searcher.calendar_spread.calendar_spread_find
 from qtrade.cryptotrader.trading_engine.containers.thread_safe_map import ThreadSafeMap
 from qtrade.order_api.deribit_order_placer.futures_order import place_limit_order_btc_notional, place_market_order_btc_notional
 from qtrade.order_api.deribit_order_placer.options_order import place_options_market_order_btc_notional
-from qtrade.order_api.deribit_order_placer.positions_info import get_total_pnl_for_instruments, get_multiple_options_position_info
+from qtrade.order_api.deribit_order_placer.options_positions_info import get_instrument_pnl, get_instrument_open_price, get_instrument_position_size
+from qtrade.order_api.deribit_order_placer.futures_market_price import get_index_price
 
 
 class RiskManager:
@@ -20,13 +21,28 @@ class RiskManager:
                  max_positions: int = 1, 
                  enable_delta_hedge: bool = False, 
                  delta_hedge_threshold: float = 0.05,
-                 delta_risk_threshold: float = 0.5): 
+                 delta_risk_threshold: float = 0.5, 
+                 stop_loss_ratio: float = -0.3, 
+                 profit_target_ratio: float = 0.5, 
+                 price_change_risk_ratio: float = 0.15): 
+        """
+        Args:
+            max_positions: 最大持仓数量
+            enable_delta_hedge: 是否启用Delta对冲
+            delta_hedge_threshold: Delta对冲阈值
+            delta_risk_threshold: Delta风险阈值
+            stop_loss_ratio: 止损百分比
+            profit_target_ratio: 止盈百分比
+        """
 
         self.max_positions = max_positions
         self.enable_delta_hedge = enable_delta_hedge
         self.delta_risk_threshold = delta_risk_threshold
         self.delta_hedge_threshold = delta_hedge_threshold
-        self.current_hedged_delta = 0.0 
+        self.current_hedged_delta = 0.0
+        self.stop_loss_ratio = stop_loss_ratio
+        self.profit_target_ratio = profit_target_ratio
+        self.price_change_risk_ratio = price_change_risk_ratio
 
         # 初始化日志记录器
         self.logger = logging.getLogger(__name__)
@@ -366,9 +382,11 @@ class RiskManager:
         
         return hedge_result
     
-    def get_opened_opportunities_pnl(self, opportunity: Union[StraddleOpportunity, CalendarSpreadOpportunity], env: str = "testnet") -> float:
+    def get_opened_opportunities_pnl(self, 
+                                     opportunity: Union[StraddleOpportunity, CalendarSpreadOpportunity], 
+                                     env: str = "testnet"):
         """
-        获取已开仓opportunity的精确未实现P&L - 基于账户汇总API
+        获取已开仓opportunity的精确未实现P&L - 使用简化API
         
         Args:
             opportunity: 持仓机会对象
@@ -378,9 +396,6 @@ class RiskManager:
             float: 精确未实现P&L (BTC)，获取失败返回0.0
         """
         try:
-            # 🆕 使用新的精确P&L API
-            from qtrade.order_api.deribit_order_placer.positions_info import get_precise_total_pnl_for_instruments
-            
             # 确定目标期权合约列表
             if isinstance(opportunity, StraddleOpportunity):
                 target_instruments = [
@@ -396,22 +411,33 @@ class RiskManager:
                 strategy_type = "Calendar Spread"
             else:
                 self.logger.error(f"❌ 未知的opportunity类型: {type(opportunity)}")
-                return 0.0
+                return None, None
             
-            # 获取精确P&L信息
-            pnl_result = get_precise_total_pnl_for_instruments(target_instruments, env)
-            precise_pnl = pnl_result["total_precise_pnl"]
-            
+            # 🆕 使用简化的精确P&L获取 - 只取第一个合约的币种P&L
+            # 假设同一策略的期权都是同一币种
+            precise_pnl_1 = get_instrument_pnl(target_instruments[0], env)
+            precise_pnl_2 = get_instrument_pnl(target_instruments[1], env)
+            precise_pnl = precise_pnl_1 + precise_pnl_2
+
+
+            contract_size = opportunity.contracts
+            open_price_1 = get_instrument_open_price(target_instruments[0], env)
+            open_price_2 = get_instrument_open_price(target_instruments[1], env)
+            total_options_cost = open_price_1 * contract_size + open_price_2 * contract_size
+            pnl_ratio = precise_pnl / total_options_cost
+
+
+
+            self.logger.info(f"for instrument {target_instruments[0]}, pnl is {precise_pnl_1:.8f} BTC")
+            self.logger.info(f"for instrument {target_instruments[1]}, pnl is {precise_pnl_2:.8f} BTC")
             self.logger.info(f"📊 {strategy_type} 精确P&L: {precise_pnl:.8f} BTC")
-            self.logger.info(f"   数据来源: {pnl_result['data_source']}")
-            self.logger.info(f"   精度级别: {pnl_result['precision_level']}")
-            self.logger.info(f"   找到持仓: {pnl_result['found_count']}/{pnl_result['total_instruments']}")
+            self.logger.info(f"   数据来源: account_summary (简化API)")
             
-            return precise_pnl
+            return precise_pnl, pnl_ratio
             
         except Exception as e:
             self.logger.error(f"❌ 获取精确P&L失败: {e}")
-            return 0.0
+            return None, None 
 
     def check_close_condition(self, position: Union[StraddleOpportunity, CalendarSpreadOpportunity], 
                             env: str = "testnet") -> tuple:
@@ -427,53 +453,283 @@ class RiskManager:
         """
         try:
             # 获取当前P&L
-            current_pnl = self.get_opened_opportunities_pnl(position, env)
+            current_pnl, current_pnl_ratio = self.get_opened_opportunities_pnl(position, env)
             
-            if current_pnl == 0.0:
+            if current_pnl == None:
                 return False, "无法获取P&L信息"
-            
-            # 计算P&L百分比（基于合约数量）
-            if hasattr(position, 'contracts') and position.contracts > 0:
-                pnl_pct = current_pnl / position.contracts
-            else:
-                pnl_pct = current_pnl  # 如果没有合约数量信息，直接使用绝对值
-            
-            # 获取持仓详细信息用于更精确的判断
+
+            # 根据策略类型调用对应的平仓检查方法
             if isinstance(position, StraddleOpportunity):
-                target_instruments = [position.call_option.symbol, position.put_option.symbol]
-                strategy_type = "Straddle"
-                
-                # Straddle平仓条件
-                if pnl_pct < -0.3:  # -30% 止损
-                    return True, f"Straddle止损 (P&L: {pnl_pct*100:.1f}%, {current_pnl:.6f} BTC)"
-                elif pnl_pct > 0.5:  # +50% 止盈
-                    return True, f"Straddle止盈 (P&L: {pnl_pct*100:.1f}%, {current_pnl:.6f} BTC)"
-                
-                # TODO: 添加IV反转检查
-                # 可以调用 update_straddle_opportunity 获取最新IV进行判断
-                
+                return self._check_straddle_close_condition(position, current_pnl, current_pnl_ratio, env)
             elif isinstance(position, CalendarSpreadOpportunity):
-                target_instruments = [position.short_option.symbol, position.long_option.symbol]
-                strategy_type = "Calendar Spread"
-                
-                # Calendar Spread平仓条件
-                if pnl_pct < -0.3:  # -30% 止损
-                    return True, f"Calendar止损 (P&L: {pnl_pct*100:.1f}%, {current_pnl:.6f} BTC)"
-                elif pnl_pct > 0.5:  # +50% 止盈
-                    return True, f"Calendar止盈 (P&L: {pnl_pct*100:.1f}%, {current_pnl:.6f} BTC)"
-                
-                # TODO: 添加IV价差反转检查
-                # 可以调用 update_calendar_spread_opportunity 获取最新IV价差进行判断
-            
+                return self._check_calendar_close_condition(position, current_pnl, current_pnl_ratio, env)
             else:
-                return False, f"未知策略类型: {type(position)}"
-            
-            return False, f"{strategy_type}继续持有 (P&L: {pnl_pct*100:.1f}%, {current_pnl:.6f} BTC)"
-            
+                self.logger.error(f"❌ 未知的position类型: {type(position)}")
+                return False, "未知策略类型"
+                
         except Exception as e:
-            print(f"❌ 检查平仓条件失败: {e}")
-            return False, f"检查失败: {str(e)}"
+            self.logger.error(f"❌ 检查平仓条件失败: {e}")
+            return False, f"检查失败: {e}"
         
     
     def monitor_positions(self):
         pass 
+    
+    def _check_straddle_close_condition(self, position: StraddleOpportunity, current_pnl: float, current_pnl_ratio: float, env: str) -> Tuple[bool, str]:
+        """
+        Straddle策略平仓条件检查
+        
+        Args:
+            position: Straddle持仓对象
+            current_pnl: 当前P&L
+            current_pnl_ratio: 当前P&L比例
+            env: 交易环境
+            
+        Returns:
+            tuple: (should_close: bool, reason: str)
+        """
+        # 1. 基础止损止盈检查
+        if current_pnl_ratio < self.stop_loss_ratio:  # -30% 止损
+            return True, f"Straddle止损 (P&L: {current_pnl_ratio*100:.1f}%, {current_pnl:.6f} BTC)"
+        elif current_pnl_ratio > self.profit_target_ratio:  # +50% 止盈
+            return True, f"Straddle止盈 (P&L: {current_pnl_ratio*100:.1f}%, {current_pnl:.6f} BTC)"
+        
+        # 2. IV反转检查 - 针对卖Straddle策略
+        try:
+            # 获取开仓时的IV
+            entry_call_iv = position.call_option_entry_iv
+            entry_put_iv = position.put_option_entry_iv
+            entry_avg_iv = (entry_call_iv + entry_put_iv) / 2
+            
+            if entry_call_iv > 0 and entry_put_iv > 0:  # 确保有有效的entry IV
+                # 直接使用当前IV数据（已在调用前更新）
+                current_call_iv = position.call_option.iv
+                current_put_iv = position.put_option.iv
+                current_avg_iv = (current_call_iv + current_put_iv) / 2
+                
+                # 计算IV变化
+                avg_iv_change = (current_avg_iv - entry_avg_iv) / entry_avg_iv
+                call_iv_change = (current_call_iv - entry_call_iv) / entry_call_iv
+                put_iv_change = (current_put_iv - entry_put_iv) / entry_put_iv
+                
+                self.logger.info(f"📊 Straddle IV变化分析:")
+                self.logger.info(f"   平均IV: {entry_avg_iv:.4f} → {current_avg_iv:.4f} ({avg_iv_change:+.1%})")
+                self.logger.info(f"   Call IV: {entry_call_iv:.4f} → {current_call_iv:.4f} ({call_iv_change:+.1%})")
+                self.logger.info(f"   Put IV: {entry_put_iv:.4f} → {current_put_iv:.4f} ({put_iv_change:+.1%})")
+                
+                # 整体IV下降10% - 获利信号
+                if avg_iv_change < -0.10:
+                    return True, f"Straddle IV大幅下降获利平仓 (平均IV下降: {avg_iv_change:.1%})"
+                
+                # 任一端IV突然上涨10% - 风险信号  
+                if call_iv_change > 0.10:
+                    return True, f"Straddle Call IV剧烈上升风险平仓 (Call IV上涨: {call_iv_change:.1%})"
+                
+                if put_iv_change > 0.10:
+                    return True, f"Straddle Put IV剧烈上升风险平仓 (Put IV上涨: {put_iv_change:.1%})"
+            
+        except Exception as e:
+            self.logger.warning(f"⚠️ Straddle IV反转检查失败: {e}")
+        
+        # 3. 价格变化检查
+        try:
+            # 获取开仓时的现货价格
+            entry_spot_price = getattr(position, 'entry_spot_price', 0)
+            
+            if entry_spot_price > 0:
+                # 获取当前现货价格
+                currency = position.call_option.symbol.split('-')[0]  # BTC-28NOV25-114000-C -> BTC
+                current_spot_price = get_index_price(currency, env)
+                
+                if current_spot_price > 0:
+                    price_change_ratio = abs(current_spot_price - entry_spot_price) / entry_spot_price
+                    
+                    self.logger.info(f"📊 价格变化分析:")
+                    self.logger.info(f"   开仓现货价: ${entry_spot_price:,.0f}")
+                    self.logger.info(f"   当前现货价: ${current_spot_price:,.0f}")
+                    self.logger.info(f"   价格变化: {price_change_ratio:+.1%}")
+                    
+                    if price_change_ratio > self.price_change_risk_ratio:
+                        return True, f"价格变化过大风险平仓 (价格变化: {price_change_ratio:.1%}, 当前: ${current_spot_price:,.0f}, 开仓: ${entry_spot_price:,.0f})"
+            
+        except Exception as e:
+            self.logger.warning(f"⚠️ 价格变化检查失败: {e}")
+        
+        # 4. 时间衰减保护
+        try:
+            # 从期权合约名解析到期日期
+            from datetime import datetime
+            
+            def parse_option_expiry_date(symbol: str):
+                """解析期权合约到期日期"""
+                try:
+                    # 从 "BTC-28NOV25-114000-C" 中提取 "28NOV25"
+                    parts = symbol.split('-')
+                    if len(parts) >= 2:
+                        date_str = parts[1]  # "28NOV25"
+                        # 解析日期格式 DDMMMYY
+                        day = int(date_str[:2])  # 28
+                        month_str = date_str[2:5]  # NOV
+                        year = 2000 + int(date_str[5:])  # 2025
+                        
+                        # 月份映射
+                        month_map = {
+                            'JAN': 1, 'FEB': 2, 'MAR': 3, 'APR': 4, 'MAY': 5, 'JUN': 6,
+                            'JUL': 7, 'AUG': 8, 'SEP': 9, 'OCT': 10, 'NOV': 11, 'DEC': 12
+                        }
+                        month = month_map.get(month_str)
+                        
+                        if month:
+                            return datetime(year, month, day).date()
+                    return None
+                except Exception:
+                    return None
+            
+            # 解析Call期权的到期日期
+            expiry_date = parse_option_expiry_date(position.call_option.symbol)
+            
+            if expiry_date:
+                from datetime import datetime
+                current_time = datetime.now()
+                days_to_expiry = (expiry_date - current_time.date()).days
+                
+                self.logger.info(f"📅 时间衰减分析:")
+                self.logger.info(f"   到期日期: {expiry_date}")
+                self.logger.info(f"   剩余天数: {days_to_expiry}天")
+                
+                # 临近到期强制平仓
+                if days_to_expiry <= 1:
+                    return True, f"临近到期强制平仓 (剩余: {days_to_expiry}天)"
+                
+                # Short Straddle在最后2天时，如果盈利则考虑平仓锁定利润
+                if "short" in position.strategy_type and days_to_expiry <= 2 and current_pnl_ratio > 0.1:
+                    return True, f"Short Straddle临近到期获利平仓 (剩余: {days_to_expiry}天, P&L: {current_pnl_ratio*100:.1f}%)"
+            
+        except Exception as e:
+            self.logger.warning(f"⚠️ 时间衰减检查失败: {e}")
+        
+        return False, f"Straddle继续持有 (P&L: {current_pnl_ratio*100:.1f}%, {current_pnl:.6f} BTC)"
+    
+    def _check_calendar_close_condition(self, position: CalendarSpreadOpportunity, current_pnl: float, current_pnl_ratio: float, env: str) -> Tuple[bool, str]:
+        """
+        Calendar Spread策略平仓条件检查
+        
+        Args:
+            position: Calendar Spread持仓对象
+            current_pnl: 当前P&L
+            current_pnl_ratio: 当前P&L比例
+            env: 交易环境
+            
+        Returns:
+            tuple: (should_close: bool, reason: str)
+        """
+        # 1. 基础止损止盈检查
+        if current_pnl_ratio < self.stop_loss_ratio:  # -30% 止损
+            return True, f"Calendar止损 (P&L: {current_pnl_ratio*100:.1f}%, {current_pnl:.6f} BTC)"
+        elif current_pnl_ratio > self.profit_target_ratio:  # +50% 止盈
+            return True, f"Calendar止盈 (P&L: {current_pnl_ratio*100:.1f}%, {current_pnl:.6f} BTC)"
+        
+        # 2. IV价差反转检查 - 针对Calendar Spread策略
+        try:
+            # 获取开仓时的IV价差
+            entry_short_iv = getattr(position, 'short_option_entry_iv', 0)
+            entry_long_iv = getattr(position, 'long_option_entry_iv', 0)
+            
+            if entry_short_iv > 0 and entry_long_iv > 0:  # 确保有有效的entry IV
+                entry_iv_spread = entry_short_iv - entry_long_iv
+                
+                # 直接使用当前IV数据（已在调用前更新）
+                current_short_iv = position.short_option.iv
+                current_long_iv = position.long_option.iv
+                current_iv_spread = current_short_iv - current_long_iv
+                
+                self.logger.info(f"📊 Calendar IV价差分析:")
+                self.logger.info(f"   开仓IV价差: {entry_iv_spread:+.4f}")
+                self.logger.info(f"   当前IV价差: {current_iv_spread:+.4f}")
+                self.logger.info(f"   Short IV: {entry_short_iv:.4f} → {current_short_iv:.4f}")
+                self.logger.info(f"   Long IV: {entry_long_iv:.4f} → {current_long_iv:.4f}")
+                
+                # 如果入场时IV价差为正但现在变为负值，立即平仓
+                if entry_iv_spread > 0 and current_iv_spread < -0.01:
+                    return True, f"Calendar IV价差反转平仓 (入场: {entry_iv_spread:+.1%} → 当前: {current_iv_spread:+.1%})"
+            else:
+                # 回退到简单的IV价差检查
+                iv_spread = position.short_option.iv - position.long_option.iv
+                if iv_spread < -0.01: 
+                    return True, f"IV价差反转平仓 (当前IV价差: {iv_spread:.1%})"
+            
+        except Exception as e:
+            self.logger.warning(f"⚠️ Calendar IV价差反转检查失败: {e}")
+        
+        # 3. Delta风险控制 (Calendar Spread使用更宽松的阈值)
+        try:
+            # 获取净Delta
+            net_delta = getattr(position, 'net_delta', 0)
+            if hasattr(position, 'long_option') and hasattr(position, 'short_option'):
+                net_delta = position.long_option.delta - position.short_option.delta
+            
+            calendar_delta_threshold = self.delta_risk_threshold * 1.67  # 0.3 * 1.67 ≈ 0.5
+            if abs(net_delta) > calendar_delta_threshold:
+                return True, f"Calendar Delta风险过大 (净Delta: {net_delta:+.3f} > ±{calendar_delta_threshold:.1f})"
+                
+        except Exception as e:
+            self.logger.warning(f"⚠️ Calendar Delta风险检查失败: {e}")
+        
+        # 4. 时间衰减保护 - 短期期权到期检查
+        try:
+            # 从期权合约名解析到期日期
+            from datetime import datetime
+            
+            def parse_option_expiry_date(symbol: str):
+                """解析期权合约到期日期"""
+                try:
+                    # 从 "BTC-28NOV25-114000-C" 中提取 "28NOV25"
+                    parts = symbol.split('-')
+                    if len(parts) >= 2:
+                        date_str = parts[1]  # "28NOV25"
+                        # 解析日期格式 DDMMMYY
+                        day = int(date_str[:2])  # 28
+                        month_str = date_str[2:5]  # NOV
+                        year = 2000 + int(date_str[5:])  # 2025
+                        
+                        # 月份映射
+                        month_map = {
+                            'JAN': 1, 'FEB': 2, 'MAR': 3, 'APR': 4, 'MAY': 5, 'JUN': 6,
+                            'JUL': 7, 'AUG': 8, 'SEP': 9, 'OCT': 10, 'NOV': 11, 'DEC': 12
+                        }
+                        month = month_map.get(month_str)
+                        
+                        if month:
+                            return datetime(year, month, day).date()
+                    return None
+                except Exception:
+                    return None
+            
+            # 解析短期期权的到期日期
+            short_expiry_date = parse_option_expiry_date(position.short_option.symbol)
+            
+            if short_expiry_date:
+                current_time = datetime.now()
+                days_to_short_expiry = (short_expiry_date - current_time.date()).days
+                
+                self.logger.info(f"📅 Calendar时间衰减分析:")
+                self.logger.info(f"   短期期权: {position.short_option.symbol}")
+                self.logger.info(f"   短期到期日: {short_expiry_date}")
+                self.logger.info(f"   剩余天数: {days_to_short_expiry}天")
+                
+                # 短期期权当天到期或已过期，立即平仓避免单腿风险
+                if days_to_short_expiry <= 0:
+                    return True, f"Calendar短期期权到期强制平仓 (短期期权剩余: {days_to_short_expiry}天，避免单腿风险)"
+                
+                # 短期期权还有1天到期，且P&L为负，平仓避免更大损失
+                if days_to_short_expiry <= 1 and current_pnl_ratio < 0:
+                    return True, f"Calendar短期期权即将到期且亏损平仓 (剩余: {days_to_short_expiry}天, P&L: {current_pnl_ratio*100:.1f}%)"
+                
+                # 短期期权还有1天到期，无论盈亏都考虑平仓（避免交割风险）
+                if days_to_short_expiry <= 1:
+                    return True, f"Calendar短期期权即将到期平仓 (剩余: {days_to_short_expiry}天，避免交割风险)"
+            
+        except Exception as e:
+            self.logger.warning(f"⚠️ Calendar时间衰减检查失败: {e}")
+        
+        return False, f"Calendar继续持有 (P&L: {current_pnl_ratio*100:.1f}%, {current_pnl:.6f} BTC)"

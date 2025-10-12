@@ -227,6 +227,10 @@ class TradingEngine:
         if result["success"]:
             opportunity.open_status = True
             opportunity.contracts = amount
+            
+            # 🆕 记录开仓时的IV信息
+            self._record_entry_iv(opportunity)
+            
             print(f"✅ 所有订单执行成功 ({success_count}/{total_orders})")
         else:
             print(f"❌ 部分订单执行失败 ({success_count}/{total_orders})")
@@ -235,6 +239,41 @@ class TradingEngine:
                     print(f"   失败订单: {order['type']} {order['side']} - {order['result'].get('error', 'Unknown error')}")
             
         return result
+
+    def _record_entry_iv(self, opportunity: Union[StraddleOpportunity, CalendarSpreadOpportunity]) -> None:
+        """
+        记录开仓时的IV信息
+        
+        Args:
+            opportunity: StraddleOpportunity or CalendarSpreadOpportunity
+        """
+        try:
+            if isinstance(opportunity, StraddleOpportunity):
+                # 记录Straddle的Call和Put开仓IV
+                opportunity.call_option_entry_iv = opportunity.call_option.iv
+                opportunity.put_option_entry_iv = opportunity.put_option.iv
+                
+                # 🆕 记录开仓时的现货价格
+                opportunity.entry_spot_price = opportunity.spot_price
+                
+                print(f"📊 记录Straddle开仓信息:")
+                print(f"   Call IV: {opportunity.call_option_entry_iv:.4f}")
+                print(f"   Put IV: {opportunity.put_option_entry_iv:.4f}")
+                print(f"   平均IV: {(opportunity.call_option_entry_iv + opportunity.put_option_entry_iv)/2:.4f}")
+                print(f"   开仓现货价: ${opportunity.entry_spot_price:,.0f}")
+                
+            elif isinstance(opportunity, CalendarSpreadOpportunity):
+                # 记录Calendar Spread的Short和Long开仓IV
+                opportunity.short_option_entry_iv = opportunity.short_option.iv
+                opportunity.long_option_entry_iv = opportunity.long_option.iv
+                
+                print(f"📊 记录Calendar Spread开仓IV:")
+                print(f"   Short IV: {opportunity.short_option_entry_iv:.4f}")
+                print(f"   Long IV: {opportunity.long_option_entry_iv:.4f}")
+                print(f"   IV价差: {opportunity.short_option_entry_iv - opportunity.long_option_entry_iv:.4f}")
+                    
+        except Exception as e:
+            print(f"❌ 记录开仓IV失败: {e}")
 
     def run_loop(self, check_durantion: str = "5min", order_type: str = "market"):
         """
@@ -296,7 +335,7 @@ class TradingEngine:
                             order_result = self._place_option_order(best_gamma_scalping_opportunity, order_type)
                             
                             if order_result["success"]:
-                                self.risk_manager.add_position(best_gamma_scalping_opportunity)
+                                position_status = self.risk_manager.add_position(best_gamma_scalping_opportunity)
                                 updated_counts = self.risk_manager.get_position_count()
                                 print(f"✅ Gamma Scalping交易成功，当前持仓: {updated_counts['straddle']}")
                             else:
