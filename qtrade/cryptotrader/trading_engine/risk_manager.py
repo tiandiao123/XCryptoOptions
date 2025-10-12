@@ -675,4 +675,61 @@ class RiskManager:
         except Exception as e:
             self.logger.warning(f"⚠️ Calendar Delta风险检查失败: {e}")
         
+        # 4. 时间衰减保护 - 短期期权到期检查
+        try:
+            # 从期权合约名解析到期日期
+            from datetime import datetime
+            
+            def parse_option_expiry_date(symbol: str):
+                """解析期权合约到期日期"""
+                try:
+                    # 从 "BTC-28NOV25-114000-C" 中提取 "28NOV25"
+                    parts = symbol.split('-')
+                    if len(parts) >= 2:
+                        date_str = parts[1]  # "28NOV25"
+                        # 解析日期格式 DDMMMYY
+                        day = int(date_str[:2])  # 28
+                        month_str = date_str[2:5]  # NOV
+                        year = 2000 + int(date_str[5:])  # 2025
+                        
+                        # 月份映射
+                        month_map = {
+                            'JAN': 1, 'FEB': 2, 'MAR': 3, 'APR': 4, 'MAY': 5, 'JUN': 6,
+                            'JUL': 7, 'AUG': 8, 'SEP': 9, 'OCT': 10, 'NOV': 11, 'DEC': 12
+                        }
+                        month = month_map.get(month_str)
+                        
+                        if month:
+                            return datetime(year, month, day).date()
+                    return None
+                except Exception:
+                    return None
+            
+            # 解析短期期权的到期日期
+            short_expiry_date = parse_option_expiry_date(position.short_option.symbol)
+            
+            if short_expiry_date:
+                current_time = datetime.now()
+                days_to_short_expiry = (short_expiry_date - current_time.date()).days
+                
+                self.logger.info(f"📅 Calendar时间衰减分析:")
+                self.logger.info(f"   短期期权: {position.short_option.symbol}")
+                self.logger.info(f"   短期到期日: {short_expiry_date}")
+                self.logger.info(f"   剩余天数: {days_to_short_expiry}天")
+                
+                # 短期期权当天到期或已过期，立即平仓避免单腿风险
+                if days_to_short_expiry <= 0:
+                    return True, f"Calendar短期期权到期强制平仓 (短期期权剩余: {days_to_short_expiry}天，避免单腿风险)"
+                
+                # 短期期权还有1天到期，且P&L为负，平仓避免更大损失
+                if days_to_short_expiry <= 1 and current_pnl_ratio < 0:
+                    return True, f"Calendar短期期权即将到期且亏损平仓 (剩余: {days_to_short_expiry}天, P&L: {current_pnl_ratio*100:.1f}%)"
+                
+                # 短期期权还有1天到期，无论盈亏都考虑平仓（避免交割风险）
+                if days_to_short_expiry <= 1:
+                    return True, f"Calendar短期期权即将到期平仓 (剩余: {days_to_short_expiry}天，避免交割风险)"
+            
+        except Exception as e:
+            self.logger.warning(f"⚠️ Calendar时间衰减检查失败: {e}")
+        
         return False, f"Calendar继续持有 (P&L: {current_pnl_ratio*100:.1f}%, {current_pnl:.6f} BTC)"
