@@ -1,15 +1,28 @@
-# Options Trading Backtesting Framework
+# Options Trading Framework
 
-一个用于期权交易策略回测的 Python 框架，专注于 BTC 期权的 Calendar Spread 和 Straddle 策略。
+一个完整的期权交易框架，支持策略回测和实时交易，专注于 BTC 期权的 Calendar Spread 和 Straddle 策略。
 
-## 功能特性
+## 🚀 核心功能
 
-- **策略支持**: Calendar Spread、Straddle（Long/Short）、Gamma Scalping
+### 📊 策略回测
+- **Calendar Spread**: 时间价值套利策略
+- **Straddle**: 波动率套利策略（Long/Short）
+- **Gamma Scalping**: Delta中性对冲策略
 - **数据处理**: OKX 期权数据预处理和 IV/Greeks 计算
 - **波动率预测**: GARCH(1,1) + EWMA 模型
-- **Delta 对冲**: 反向永续合约对冲功能
-- **风险管理**: 异常交易检测和排除
-- **性能分析**: Sharpe、Sortino、MDD、Calmar 等指标
+
+### ⚡ 实时交易 (新功能)
+- **多线程交易引擎**: 机会发现、风险管理、P&L监控
+- **智能风险管理**: 自动止损止盈、IV反转检测、时间衰减保护
+- **Delta对冲**: 基于实时Greeks的自动对冲
+- **实时监控**: Equity曲线绘制、详细交易日志
+- **Deribit集成**: 完整的期权和期货交易API
+
+### 🛡️ 风险管理
+- **多层风险控制**: 止损止盈、Delta风险、价格变化风险
+- **时间衰减保护**: 自动检测期权到期风险
+- **IV反转检测**: 智能识别波动率套利机会
+- **实时P&L追踪**: 精确的盈亏计算和记录
 
 ## 策略详解
 
@@ -94,7 +107,36 @@ target_profit_pct = 50%  # 相对入场权利金
 pip install -e .
 ```
 
-### 运行回测
+### 🔄 实时交易
+
+#### 启动实时交易引擎
+```python
+from qtrade.cryptotrader.trading_engine.trading_engine import TradingEngine
+
+# 创建交易引擎
+trading_engine = TradingEngine(
+    calendar_config_path="qtrade/cryptotrader/arbitrage_searcher/calendar_spread/calendar_spread.yaml",
+    gamma_scalping_config_path="qtrade/cryptotrader/arbitrage_searcher/gamma_scalping/selling_straddle.yaml",
+    env="testnet",  # 或 "mainnet"
+    max_open_calendar=2,
+    max_open_gamma_scalping=2,
+    enable_delta_hedge=True,
+    output_folder="./trading_results"  # 结果输出文件夹
+)
+
+# 启动交易循环（包含3个独立线程）
+trading_engine.run_loop(
+    check_durantion=300,  # 5分钟检查间隔
+    order_type="market"   # 市价单
+)
+```
+
+#### 交易引擎特性
+- **主交易线程**: 机会发现和订单执行
+- **风险监控线程**: 实时持仓监控和平仓管理
+- **P&L记录线程**: Equity曲线绘制和交易记录
+
+### 📊 策略回测
 
 #### Calendar Spread 策略
 ```python
@@ -126,20 +168,45 @@ backtest_strategy(
 
 ```
 qtrade/
-├── data_loader.py              # 数据加载和迭代器
-├── data_utils.py              # 数据处理工具函数
-├── simulate_tarde/
-│   ├── spread_trading.py      # 主回测引擎
+├── cryptotrader/                   # 🆕 实时交易模块
+│   ├── trading_engine/
+│   │   ├── trading_engine.py      # 主交易引擎
+│   │   ├── risk_manager.py        # 风险管理系统
+│   │   └── containers/            # 线程安全容器
+│   └── arbitrage_searcher/        # 套利机会搜索
+│       ├── calendar_spread/       # Calendar Spread策略
+│       ├── gamma_scalping/        # Gamma Scalping策略
+│       └── calendar_spread_manager.py
+├── order_api/                     # 🆕 交易API集成
+│   └── deribit_order_placer/      # Deribit交易所API
+│       ├── options_order.py       # 期权订单
+│       ├── futures_order.py       # 期货订单
+│       ├── current_balance.py     # 账户信息
+│       └── options_positions_info.py  # 持仓信息
+├── simulate_tarde/                # 策略回测模块
+│   ├── spread_trading.py         # 主回测引擎
 │   ├── pairs/
-│   │   ├── calendar_pair.py   # Calendar Spread 策略类
-│   │   └── straddle_pair.py   # Straddle 策略类
+│   │   ├── calendar_pair.py      # Calendar Spread 策略类
+│   │   └── straddle_pair.py      # Straddle 策略类
 │   ├── vol_tracker/
-│   │   └── vol_tracker.py     # GARCH/EWMA 波动率预测
-│   ├── calendar_helper.py     # Calendar 策略辅助函数
-│   ├── straddle_helper.py     # Straddle 策略辅助函数
-│   ├── trading_utils.py       # 通用交易工具
-│   └── metric_performance.py  # 性能指标计算
-└── okx_options_analysis/      # 期权数据分析工具
+│   │   └── vol_tracker.py        # GARCH/EWMA 波动率预测
+│   └── metric_performance.py     # 性能指标计算
+├── data_loader.py                # 数据加载和迭代器
+├── data_utils.py                 # 数据处理工具函数
+└── okx_options_analysis/         # 期权数据分析工具
+```
+
+## 📈 实时交易输出
+
+交易引擎会在指定文件夹生成：
+
+```
+trading_results/
+├── charts/
+│   └── equity_curve_20231012.png  # 实时Equity曲线图
+└── logs/
+    ├── pnl_data.json              # P&L历史数据
+    └── position_closes.txt        # 详细平仓记录
 ```
 
 ## 性能指标
@@ -158,6 +225,12 @@ qtrade/
 - **包含字段**: 期权价格、隐含波动率、Greeks（Delta、Gamma、Vega）
 - **时间范围**: 建议至少 1 年以上的历史数据
 - **数据质量**: 已处理异常值和缺失数据
+
+## 📚 文档
+
+- **[详细教程](docs/tutorial.md)**: 完整的安装、配置和使用指南
+- **[API文档](docs/api.md)**: 详细的API参考文档  
+- **[策略说明](docs/strategies.md)**: 深入的策略原理和参数说明
 
 ## 风险提示
 
