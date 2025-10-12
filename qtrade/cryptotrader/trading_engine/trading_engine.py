@@ -1,5 +1,7 @@
 import time
 import threading
+import os
+import json
 from datetime import datetime
 from typing import List, Union, Dict, Any
 from qtrade.cryptotrader.arbitrage_searcher.calendar_spread.calendar_spread_finder import CalendarSpreadOpportunity
@@ -21,7 +23,8 @@ class TradingEngine:
                  env: str = "testnet", 
                  max_open_calendar: int = 1, # Calendar Spread最大持仓数量
                  max_open_gamma_scalping: int = 1, # Gamma Scalping最大持仓数量
-                 enable_delta_hedge: bool = True):
+                 enable_delta_hedge: bool = True,
+                 output_folder: str = "/home/ubuntu/options_trading/trading_results"): # 🆕 输出文件夹参数
         """
         Args:
             calendar_config_path: Calendar Spread配置文件路径
@@ -29,16 +32,59 @@ class TradingEngine:
             env: 交易环境 (testnet/mainnet)
             max_open_calendar: 最大持仓数量 Calendar Spread
             max_open_gamma_scalping: 最大持仓数量 Gamma Scalping
-            enable_delta_hedge: 是否启用Delta对冲   
+            enable_delta_hedge: 是否启用Delta对冲
+            output_folder: 输出文件夹路径，用于存储图表和日志
         """
         self.env = env 
         self.max_open_calendar = max_open_calendar
         self.max_open_gamma_scalping = max_open_gamma_scalping
+        self.output_folder = output_folder
+        
+        # 🆕 初始化输出文件夹结构
+        self._setup_output_folders()
+        
+        print(f"🚀 TradingEngine初始化")
+        print(f"   交易环境: {env}")
+        print(f"   输出文件夹: {output_folder}")
+        print(f"   图表文件夹: {self.charts_folder}")
+        print(f"   日志文件夹: {self.logs_folder}")
         
         self.calendar_spread_manager = CalendarArbitrageManager(calendar_config_path, env)
         self.gamma_scalping_manager = GammaScalpingManager(gamma_scalping_config_path, env)
 
         self.risk_manager = RiskManager(max_positions=max_open_calendar + max_open_gamma_scalping, enable_delta_hedge=enable_delta_hedge)
+    
+    def _setup_output_folders(self):
+        """初始化输出文件夹结构"""
+        try:
+            # 创建主输出文件夹
+            os.makedirs(self.output_folder, exist_ok=True)
+            
+            # 创建子文件夹
+            self.charts_folder = os.path.join(self.output_folder, "charts")
+            self.logs_folder = os.path.join(self.output_folder, "logs")
+            
+            os.makedirs(self.charts_folder, exist_ok=True)
+            os.makedirs(self.logs_folder, exist_ok=True)
+            
+            # 设置文件路径
+            self.pnl_data_file = os.path.join(self.logs_folder, "pnl_data.json")
+            self.position_close_log = os.path.join(self.logs_folder, "position_closes.txt")
+            
+            print(f"📁 输出文件夹结构创建成功:")
+            print(f"   主文件夹: {self.output_folder}")
+            print(f"   图表文件夹: {self.charts_folder}")
+            print(f"   日志文件夹: {self.logs_folder}")
+            
+        except Exception as e:
+            print(f"❌ 创建输出文件夹失败: {e}")
+            # 使用默认路径作为备用
+            self.charts_folder = "/tmp/charts"
+            self.logs_folder = "/tmp/logs"
+            self.pnl_data_file = "/tmp/pnl_data.json"
+            self.position_close_log = "/tmp/position_closes.txt"
+            os.makedirs(self.charts_folder, exist_ok=True)
+            os.makedirs(self.logs_folder, exist_ok=True)
     
     def _transform_check_durantion(self, check_durantion: str):
         if check_durantion == "5min":
@@ -306,6 +352,18 @@ class TradingEngine:
         print(f"   线程ID: {monitoring_thread.ident}")
         print(f"   监控间隔: {check_durantion}秒")
 
+        # 🆕 create another thread to record P&L
+        pnl_recording_thread = threading.Thread(
+            target=self._start_pnl_recording,
+            args=(check_durantion,),  # 使用相同的记录间隔
+            daemon=True,
+            name="PnLRecorder"
+        )
+        pnl_recording_thread.start()
+        print(f"📊 P&L记录线程已启动 (线程名: {pnl_recording_thread.name})")
+        print(f"   线程ID: {pnl_recording_thread.ident}")
+        print(f"   记录间隔: {check_durantion}秒")
+
         
         while True:
             try:
@@ -375,9 +433,180 @@ class TradingEngine:
     
     
 
-    def record_pnl(self, ): 
-        # get account info 
-        pass 
+    def record_pnl(self, record_interval: int = 300):
+        """
+        定期记录账户equity信息并绘制曲线图
+        
+        Args:
+            record_interval: 记录间隔（秒），默认300秒（5分钟）
+        """
+        import matplotlib.pyplot as plt
+        import matplotlib.dates as mdates
+        from qtrade.order_api.deribit_order_placer.current_balance import get_account_summary
+        
+        try:
+            print(f"🚀 启动P&L记录线程")
+            print(f"   记录间隔: {record_interval}秒 ({record_interval//60}分钟)")
+            print(f"   交易环境: {self.env}")
+            print(f"   图表保存路径: {self.charts_folder}")
+            print(f"   数据保存路径: {self.pnl_data_file}")
+            
+            # 使用动态路径
+            initial_equity = None
+            pnl_history = []
+            
+            # 尝试加载历史数据
+            if os.path.exists(self.pnl_data_file):
+                try:
+                    with open(self.pnl_data_file, 'r') as f:
+                        saved_data = json.load(f)
+                        initial_equity = saved_data.get('initial_equity')
+                        pnl_history = saved_data.get('history', [])
+                    print(f"📊 加载历史P&L数据: {len(pnl_history)}条记录")
+                    if initial_equity:
+                        print(f"   初始Equity: {initial_equity:.6f} BTC")
+                except Exception as e:
+                    print(f"⚠️ 加载历史数据失败: {e}")
+            
+            while True:
+                try:
+                    current_time = datetime.now()
+                    timestamp = current_time.strftime('%Y-%m-%d %H:%M:%S')
+                    
+                    # 获取BTC账户信息
+                    btc_summary = get_account_summary("BTC", self.env)
+                    current_equity = btc_summary.get("equity", 0.0)
+                    
+                    # 设置初始equity
+                    if initial_equity is None:
+                        initial_equity = current_equity
+                        print(f"📊 设置初始Equity: {initial_equity:.6f} BTC")
+                    
+                    # 计算相对P&L
+                    relative_pnl = current_equity - initial_equity
+                    
+                    # 记录数据
+                    record = {
+                        "timestamp": timestamp,
+                        "equity": current_equity,
+                        "relative_pnl": relative_pnl,
+                        "datetime": current_time.isoformat()
+                    }
+                    pnl_history.append(record)
+                    
+                    print(f"📊 [{timestamp}] Equity记录:")
+                    print(f"   当前Equity: {current_equity:.6f} BTC")
+                    print(f"   相对P&L: {relative_pnl:+.6f} BTC")
+                    print(f"   相对P&L%: {(relative_pnl/initial_equity*100):+.2f}%")
+                    
+                    # 保存数据到文件
+                    data_to_save = {
+                        "initial_equity": initial_equity,
+                        "history": pnl_history,
+                        "last_update": timestamp
+                    }
+                    
+                    with open(self.pnl_data_file, 'w') as f:
+                        json.dump(data_to_save, f, indent=2)
+                    
+                    # 每10条记录或每小时更新一次图表
+                    if len(pnl_history) % 10 == 0 or len(pnl_history) % (3600//record_interval) == 0:
+                        self._update_equity_chart(pnl_history, initial_equity)
+                    
+                    time.sleep(record_interval)
+                    
+                except KeyboardInterrupt:
+                    print(f"🛑 P&L记录线程收到中断信号")
+                    break
+                except Exception as e:
+                    print(f"❌ P&L记录出错: {e}")
+                    time.sleep(60)  # 出错后等待1分钟再继续
+                    
+        except Exception as e:
+            print(f"❌ P&L记录线程启动失败: {e}")
+            import traceback
+            traceback.print_exc()
+    
+    def _update_equity_chart(self, pnl_history: List[Dict], initial_equity: float):
+        """更新equity曲线图"""
+        try:
+            import matplotlib.pyplot as plt
+            import matplotlib.dates as mdates
+            from datetime import datetime
+            
+            if len(pnl_history) < 2:
+                return
+            
+            # 准备数据
+            timestamps = []
+            relative_pnls = []
+            
+            for record in pnl_history:
+                timestamps.append(datetime.fromisoformat(record['datetime']))
+                relative_pnls.append(record['relative_pnl'])
+            
+            # 创建图表
+            plt.figure(figsize=(12, 8))
+            
+            # 绘制相对P&L曲线
+            plt.subplot(2, 1, 1)
+            plt.plot(timestamps, relative_pnls, 'b-', linewidth=2, label='Relative P&L (BTC)')
+            plt.axhline(y=0, color='gray', linestyle='--', alpha=0.7)
+            plt.title(f'Options Trading Equity Curve (Initial: {initial_equity:.6f} BTC)', fontsize=14, fontweight='bold')
+            plt.ylabel('Relative P&L (BTC)', fontsize=12)
+            plt.grid(True, alpha=0.3)
+            plt.legend()
+            
+            # 设置x轴格式
+            plt.gca().xaxis.set_major_formatter(mdates.DateFormatter('%m-%d %H:%M'))
+            plt.gca().xaxis.set_major_locator(mdates.HourLocator(interval=1))
+            plt.xticks(rotation=45)
+            
+            # 绘制百分比P&L曲线
+            plt.subplot(2, 1, 2)
+            relative_pnl_pct = [(pnl/initial_equity*100) for pnl in relative_pnls]
+            plt.plot(timestamps, relative_pnl_pct, 'g-', linewidth=2, label='Relative P&L (%)')
+            plt.axhline(y=0, color='gray', linestyle='--', alpha=0.7)
+            plt.ylabel('Relative P&L (%)', fontsize=12)
+            plt.xlabel('Time', fontsize=12)
+            plt.grid(True, alpha=0.3)
+            plt.legend()
+            
+            # 设置x轴格式
+            plt.gca().xaxis.set_major_formatter(mdates.DateFormatter('%m-%d %H:%M'))
+            plt.gca().xaxis.set_major_locator(mdates.HourLocator(interval=1))
+            plt.xticks(rotation=45)
+            
+            # 调整布局
+            plt.tight_layout()
+            
+            # 保存图表
+            chart_filename = os.path.join(self.charts_folder, f"equity_curve_{datetime.now().strftime('%Y%m%d')}.png")
+            plt.savefig(chart_filename, dpi=300, bbox_inches='tight')
+            plt.close()
+            
+            print(f"📈 Equity曲线图已更新: {chart_filename}")
+            
+        except Exception as e:
+            print(f"❌ 更新Equity图表失败: {e}")
+    
+    def _start_pnl_recording(self, record_interval: int):
+        """启动P&L记录的独立线程"""
+        try:
+            print(f"🚀 P&L记录线程启动")
+            print(f"   记录间隔: {record_interval}秒")
+            print(f"   线程ID: {threading.current_thread().ident}")
+            print(f"   线程名: {threading.current_thread().name}")
+            
+            # 调用record_pnl方法
+            self.record_pnl(record_interval)
+            
+        except KeyboardInterrupt:
+            print(f"🛑 P&L记录线程收到中断信号")
+        except Exception as e:
+            print(f"❌ P&L记录线程出错: {e}")
+            import traceback
+            traceback.print_exc()
     
     def _start_position_monitoring(self, check_interval: int):
         """
