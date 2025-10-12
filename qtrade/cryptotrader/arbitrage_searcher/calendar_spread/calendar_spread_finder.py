@@ -23,6 +23,10 @@ class CalendarSpreadOpportunity:
     max_profit_potential: float  # 最大盈利潜力
     signal_strength: str      # 信号强度：WEAK, MODERATE, STRONG
 
+    # 🆕 开仓时的IV记录
+    short_option_entry_iv: float = 0.0
+    long_option_entry_iv: float = 0.0
+
     open_status: bool = False  # 是否持仓
     contracts: float = 0.0 # 持仓大小
 

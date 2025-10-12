@@ -34,6 +34,13 @@ class StraddleOpportunity:
     realized_vol: float = 0.0
     iv_premium: float = 0.0  # IV - RV
     iv_premium_pct: float = 0.0  # (IV - RV) / RV * 100
+
+    # entry iv 
+    call_option_entry_iv: float = 0.0
+    put_option_entry_iv: float = 0.0
+    
+    # 🆕 开仓时的现货价格
+    entry_spot_price: float = 0.0
     
     # 价格分析
     total_premium: float = 0.0
