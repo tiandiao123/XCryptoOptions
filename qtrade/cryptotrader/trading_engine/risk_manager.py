@@ -1,9 +1,11 @@
 
 
 from collections import deque
+import time
 from typing import Any, Dict, Union, Tuple
 import logging
 
+from qtrade.cryptotrader.arbitrage_searcher.gamma_scalping.ewma_vol_tracker import RealDataEWMAVolTracker
 from qtrade.cryptotrader.arbitrage_searcher.gamma_scalping.selling_straddle_finder import StraddleOpportunity
 from qtrade.cryptotrader.arbitrage_searcher.calendar_spread.calendar_spread_finder import CalendarSpreadOpportunity
 # 导入更新
@@ -18,13 +20,16 @@ from qtrade.order_api.deribit_order_placer.futures_market_price import get_index
 
 class RiskManager:
     def __init__(self, 
+                 symbol: str = "BTCUSDT",
                  max_positions: int = 1, 
                  enable_delta_hedge: bool = False, 
                  delta_hedge_threshold: float = 0.05,
                  delta_risk_threshold: float = 0.5, 
                  stop_loss_ratio: float = -0.3, 
                  profit_target_ratio: float = 0.5, 
-                 price_change_risk_ratio: float = 0.15): 
+                 price_change_risk_ratio: float = 0.15, 
+                 realized_vol_level: str = "30m", 
+                 env: str = "testnet"): 
         """
         Args:
             max_positions: 最大持仓数量
@@ -33,6 +38,8 @@ class RiskManager:
             delta_risk_threshold: Delta风险阈值
             stop_loss_ratio: 止损百分比
             profit_target_ratio: 止盈百分比
+            price_change_risk_ratio: 价格变化风险阈值
+            realized_vol_level: 实现波动率级别
         """
 
         self.max_positions = max_positions
@@ -43,6 +50,8 @@ class RiskManager:
         self.stop_loss_ratio = stop_loss_ratio
         self.profit_target_ratio = profit_target_ratio
         self.price_change_risk_ratio = price_change_risk_ratio
+        self.realized_vol_level = realized_vol_level
+        self.env = env
 
         # 初始化日志记录器
         self.logger = logging.getLogger(__name__)
@@ -55,6 +64,15 @@ class RiskManager:
 
         self.straddle_positions = ThreadSafeMap()
         self.calendar_spread_positions = ThreadSafeMap()
+
+
+        # create realize_vol extracter 
+        if "BTC" in symbol:
+            self.realize_vol_extracter = RealDataEWMAVolTracker(symbol="BTCUSDT", interval=realized_vol_level)
+        elif "ETH" in symbol:
+            self.realize_vol_extracter = RealDataEWMAVolTracker(symbol="ETHUSDT", interval=realized_vol_level)
+        else:
+            raise ValueError(f"Invalid symbol: {symbol}")
     
 
     def add_position(self, position: Union[StraddleOpportunity, CalendarSpreadOpportunity]):
@@ -117,8 +135,8 @@ class RiskManager:
         """
         if isinstance(position, StraddleOpportunity):
             position_key = f"straddle_{position.call_option.symbol}_{position.put_option.symbol}"
-            if self.straddle_positions.contains_key(position_key):
-                self.straddle_positions.remove(position_key)
+            if position_key in self.straddle_positions:
+                del self.straddle_positions[position_key]
                 print(f"✅ 移除Straddle持仓: {position_key}")
                 return True
             else:
@@ -127,8 +145,8 @@ class RiskManager:
                 
         elif isinstance(position, CalendarSpreadOpportunity):
             position_key = f"calendar_{position.short_option.symbol}_{position.long_option.symbol}"
-            if self.calendar_spread_positions.contains_key(position_key):
-                self.calendar_spread_positions.remove(position_key)
+            if position_key in self.calendar_spread_positions:
+                del self.calendar_spread_positions[position_key]
                 print(f"✅ 移除Calendar Spread持仓: {position_key}")
                 return True
             else:
@@ -150,7 +168,7 @@ class RiskManager:
             "total": self.straddle_positions.size() + self.calendar_spread_positions.size()
         }
     
-    def update_positions_geeks(self, realized_vol: float, env: str = "testnet"):
+    def update_positions(self, realized_vol: float, env: str = "testnet"):
         """
         更新所有持仓的Greeks并计算组合的Net Delta
         
@@ -166,15 +184,15 @@ class RiskManager:
         updated_positions = 0
         
         print(f"🔄 开始更新所有持仓的Greeks...")
-        print(f"   Straddle持仓: {self.straddle_positions.size()}")
-        print(f"   Calendar Spread持仓: {self.calendar_spread_positions.size()}")
+        print(f"   Straddle持仓: {len(self.straddle_positions)}")
+        print(f"   Calendar Spread持仓: {len(self.calendar_spread_positions)}")
         
         # 更新所有Straddle持仓
-        if self.straddle_positions.size() > 0:
+        if len(self.straddle_positions) > 0:
             print(f"\n📊 更新Straddle持仓...")
             
             # 获取所有Straddle持仓的键值对
-            straddle_items = self.straddle_positions.get_all_items()
+            straddle_items = self.straddle_positions.items()
             positions_to_close = []  # 需要关闭的持仓
             
             for position_key, straddle_position in straddle_items:
@@ -196,6 +214,12 @@ class RiskManager:
                         print(f"⚠️ Straddle持仓 {position_key} 超过风险阈值: {updated_net_delta:.4f}")
                         positions_to_close.append(("straddle", position_key, straddle_position))
                         continue
+
+                    close_condition, close_reason = self.check_close_condition(straddle_position, env)
+                    if close_condition:
+                        print(f"⚠️ Straddle持仓 {position_key} 需要平仓: {close_reason}")
+                        positions_to_close.append(("straddle", position_key, straddle_position))
+                        continue
                     
                     total_net_delta += updated_net_delta
                     updated_positions += 1
@@ -209,17 +233,17 @@ class RiskManager:
             for pos_type, pos_key, position in positions_to_close:
                 try:
                     self.close_positions(position, env)
-                    self.straddle_positions.remove(pos_key)
+                    del self.straddle_positions[pos_key]
                     print(f"✅ 已关闭并移除Straddle持仓: {pos_key}")
                 except Exception as e:
                     print(f"❌ 关闭Straddle持仓失败 {pos_key}: {e}")
         
         # 更新所有Calendar Spread持仓
-        if self.calendar_spread_positions.size() > 0:
+        if len(self.calendar_spread_positions) > 0:
             print(f"\n📊 更新Calendar Spread持仓...")
             
             # 获取所有Calendar持仓的键值对
-            calendar_items = self.calendar_spread_positions.get_all_items()
+            calendar_items = self.calendar_spread_positions.items()
             positions_to_close = []  # 需要关闭的持仓
             
             for position_key, calendar_position in calendar_items:
@@ -242,6 +266,12 @@ class RiskManager:
                         print(f"⚠️ Calendar持仓 {position_key} 超过风险阈值: {updated_net_delta:.4f}")
                         positions_to_close.append(("calendar", position_key, calendar_position))
                         continue
+
+                    close_condition, close_reason = self.check_close_condition(calendar_position, env)
+                    if close_condition:
+                        print(f"⚠️ Calendar Spread持仓 {position_key} 需要平仓: {close_reason}")
+                        positions_to_close.append(("calendar", position_key, calendar_position))
+                        continue
                     
                     total_net_delta += updated_net_delta
                     updated_positions += 1
@@ -255,7 +285,7 @@ class RiskManager:
             for pos_type, pos_key, position in positions_to_close:
                 try:
                     self.close_positions(position, env)
-                    self.calendar_spread_positions.remove(pos_key)
+                    del self.calendar_spread_positions[pos_key]
                     print(f"✅ 已关闭并移除Calendar持仓: {pos_key}")
                 except Exception as e:
                     print(f"❌ 关闭Calendar持仓失败 {pos_key}: {e}")
@@ -472,8 +502,39 @@ class RiskManager:
             return False, f"检查失败: {e}"
         
     
-    def monitor_positions(self):
-        pass 
+    def monitor_positions(self, check_duration: str = "5min"):
+
+        # convert check_duration to seconds
+        check_duration = self._transform_check_duration(check_duration)
+        
+        while True:
+            # get realize_vol
+            current_realize_vol = self.realize_vol_extracter.predict()['realized_vol_annualized']
+            total_net_delta = self.update_positions(current_realize_vol, self.env)
+
+            # 当前逻辑：无论Delta多小都会对冲
+            hedge_delta_diff = -total_net_delta - self.current_hedged_delta
+
+            # 建议：添加阈值检查
+            if abs(hedge_delta_diff) > self.delta_hedge_threshold:
+                self.hedge_action(hedge_delta_diff, self.env)
+                self.current_hedged_delta = -total_net_delta
+
+            time.sleep(check_duration)
+    
+    def _transform_check_duration(self, check_duration: str):
+        if check_duration == "5min":
+            check_duration = 300
+        elif check_duration == "10min":
+            check_duration = 600
+        elif check_duration == "15min":
+            check_duration = 900
+        elif check_duration == "30min":
+            check_duration = 1800
+        else:
+            raise ValueError(f"Invalid check duration: {check_duration}")
+
+        return check_duration
     
     def _check_straddle_close_condition(self, position: StraddleOpportunity, current_pnl: float, current_pnl_ratio: float, env: str) -> Tuple[bool, str]:
         """

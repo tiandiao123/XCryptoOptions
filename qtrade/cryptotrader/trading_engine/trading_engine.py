@@ -1,4 +1,5 @@
 import time
+import threading
 from datetime import datetime
 from typing import List, Union, Dict, Any
 from qtrade.cryptotrader.arbitrage_searcher.calendar_spread.calendar_spread_finder import CalendarSpreadOpportunity
@@ -293,6 +294,19 @@ class TradingEngine:
         print(f"   最大Calendar持仓: {self.max_open_calendar}")
         print(f"   最大Gamma Scalping持仓: {self.max_open_gamma_scalping}")
 
+        # create another thread to monitor positions
+        monitoring_thread = threading.Thread(
+            target=self._start_position_monitoring,
+            args=(check_durantion,),  # 使用相同的检查间隔
+            daemon=True,  # 设置为守护线程，主程序退出时自动结束
+            name="PositionMonitor"
+        )
+        monitoring_thread.start()
+        print(f"🔍 持仓监控线程已启动 (线程名: {monitoring_thread.name})")
+        print(f"   线程ID: {monitoring_thread.ident}")
+        print(f"   监控间隔: {check_durantion}秒")
+
+        
         while True:
             try:
                 print(f"\n🔍 [{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 检查交易机会...")
@@ -344,9 +358,6 @@ class TradingEngine:
                         print("📊 未发现Gamma Scalping机会")
                 else:
                     print(f"📊 Gamma Scalping持仓已满 ({position_counts['straddle']}/{self.max_open_gamma_scalping})")
-
-                # 检查是否需要平仓
-                self.check_close()
                 
                 # 记录PnL
                 self.record_pnl()
@@ -362,10 +373,44 @@ class TradingEngine:
                 print("⏰ 等待60秒后继续...")
                 time.sleep(60)
     
-    def check_close(self):
-        pass 
     
 
     def record_pnl(self, ): 
         # get account info 
         pass 
+    
+    def _start_position_monitoring(self, check_interval: int):
+        """
+        启动持仓监控的独立线程
+        
+        Args:
+            check_interval: 检查间隔（秒）
+        """
+        try:
+            print(f"🚀 持仓监控线程启动")
+            print(f"   监控间隔: {check_interval}秒")
+            print(f"   线程ID: {threading.current_thread().ident}")
+            print(f"   线程名: {threading.current_thread().name}")
+            
+            # 转换为适合RiskManager的格式
+            if check_interval <= 300:  # 5分钟以内
+                duration_str = "5min"
+            elif check_interval <= 600:  # 10分钟以内
+                duration_str = "10min"
+            elif check_interval <= 900:  # 15分钟以内
+                duration_str = "15min"
+            else:
+                duration_str = "30min"
+            
+            print(f"   RiskManager监控间隔: {duration_str}")
+            print(f"   Delta对冲: {'启用' if self.risk_manager.enable_delta_hedge else '禁用'}")
+            
+            # 调用RiskManager的监控方法
+            self.risk_manager.monitor_positions(check_duration=duration_str)
+            
+        except KeyboardInterrupt:
+            print(f"🛑 持仓监控线程收到中断信号")
+        except Exception as e:
+            print(f"❌ 持仓监控线程出错: {e}")
+            import traceback
+            traceback.print_exc()
