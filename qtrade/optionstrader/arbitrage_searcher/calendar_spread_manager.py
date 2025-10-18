@@ -7,8 +7,8 @@ import logging
 from dataclasses import dataclass
 
 # 导入我们的Calendar Spread模块
-from qtrade.cryptotrader.arbitrage_searcher.calendar_spread.atm_options_filter import get_atm_options
-from qtrade.cryptotrader.arbitrage_searcher.calendar_spread.calendar_spread_finder import (
+from qtrade.optionstrader.arbitrage_searcher.calendar_spread.atm_options_filter import get_atm_options
+from qtrade.optionstrader.arbitrage_searcher.calendar_spread.calendar_spread_finder import (
     find_calendar_spread_options, 
     CalendarSpreadOpportunity,
     display_calendar_opportunities

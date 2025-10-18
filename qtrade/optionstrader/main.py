@@ -1,4 +1,4 @@
-from qtrade.cryptotrader.trading_engine.trading_engine import TradingEngine
+from qtrade.optionstrader.trading_engine.trading_engine import TradingEngine
 
 
 if __name__ == "__main__":

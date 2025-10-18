@@ -12,7 +12,7 @@ import logging
 from dataclasses import dataclass
 
 # 导入我们的Gamma Scalping模块
-from qtrade.cryptotrader.arbitrage_searcher.gamma_scalping.selling_straddle_finder import (
+from qtrade.optionstrader.arbitrage_searcher.gamma_scalping.selling_straddle_finder import (
     SellingStraddleFinder,
     StraddleOpportunity
 )

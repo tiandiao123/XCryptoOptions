@@ -4,13 +4,13 @@ import os
 import json
 from datetime import datetime
 from typing import List, Union, Dict, Any
-from qtrade.cryptotrader.arbitrage_searcher.calendar_spread.calendar_spread_finder import CalendarSpreadOpportunity
-from qtrade.cryptotrader.arbitrage_searcher.calendar_spread_manager import CalendarArbitrageManager
-from qtrade.cryptotrader.arbitrage_searcher.gamma_scalping.selling_straddle_finder import StraddleOpportunity
-from qtrade.cryptotrader.arbitrage_searcher.gamma_scalping_manager import GammaScalpingManager
+from qtrade.optionstrader.arbitrage_searcher.calendar_spread.calendar_spread_finder import CalendarSpreadOpportunity
+from qtrade.optionstrader.arbitrage_searcher.calendar_spread_manager import CalendarArbitrageManager
+from qtrade.optionstrader.arbitrage_searcher.gamma_scalping.selling_straddle_finder import StraddleOpportunity
+from qtrade.optionstrader.arbitrage_searcher.gamma_scalping_manager import GammaScalpingManager
 
 # 导入期权下单API
-from qtrade.cryptotrader.trading_engine.risk_manager import RiskManager
+from qtrade.optionstrader.trading_engine.risk_manager import RiskManager
 from qtrade.order_api.deribit_order_placer.options_order import (
     place_options_market_order_btc_notional
 )
