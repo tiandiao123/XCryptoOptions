@@ -144,6 +144,18 @@ def map_bn_to_okx_inst(symbol: str) -> str:
     return f"{base}-USDT-SWAP"
 
 
+def map_okx_to_bn_symbol(inst_id: str) -> str:
+    # e.g., 1000SHIB-USDT-SWAP -> 1000SHIBUSDT
+    base = inst_id.split("-")[0]
+    return f"{base}USDT"
+
+
+def map_bybit_to_okx_inst(symbol: str) -> str:
+    # e.g., SHIBUSDT or 1000SHIBUSDT -> SHIB-USDT-SWAP or 1000SHIB-USDT-SWAP
+    base = symbol[:-4] if symbol.endswith("USDT") else symbol
+    return f"{base}-USDT-SWAP"
+
+
 def _normalize_bn_price(symbol: str, price: float) -> Tuple[float, bool]:
     # Normalize 1000- prefixed contracts to base units (divide by 1000)
     if symbol.startswith("1000"):
@@ -441,6 +453,164 @@ def extract_top_pairs_by_funding_rate_diff(pairs: List[Dict], top_n: int = 40) -
     # Sort by abs diff descending and return top_n
     valid.sort(key=lambda x: x["fr_diff_abs"], reverse=True)
     return valid[:top_n]
+
+
+# ---------- New: Pairwise funding-rate diff helpers ----------
+
+def fetch_bn_fr8_map() -> Dict[str, float]:
+    mp = {}
+    data = bn_get_all_usdtm_funding()
+    for sym, v in data.items():
+        fr = v.get("funding_rate")
+        if isinstance(fr, float):
+            mp[sym] = fr  # assume 8h
+    return mp
+
+
+def fetch_bn_next_map() -> Dict[str, int]:
+    nxt = {}
+    data = bn_get_all_usdtm_funding()
+    for sym, v in data.items():
+        t = v.get("next_time") or v.get("ts")
+        if isinstance(t, int):
+            nxt[sym] = t
+    return nxt
+
+def fetch_okx_fr8_map() -> Dict[str, float]:
+    last = okx_get_swap_last_prices()
+    frs = okx_get_funding_rates(list(last.keys()))
+    mp = {}
+    for inst, v in frs.items():
+        fr = v.get("funding_rate")
+        if isinstance(fr, float):
+            mp[inst] = fr  # assume 8h
+    return mp
+
+
+def fetch_okx_next_map() -> Dict[str, int]:
+    last = okx_get_swap_last_prices()
+    frs = okx_get_funding_rates(list(last.keys()))
+    nxt = {}
+    for inst, v in frs.items():
+        t = v.get("next_time")
+        if isinstance(t, int):
+            nxt[inst] = t
+    return nxt
+
+def fetch_bybit_fr8_map() -> Dict[str, float]:
+    _, frs = bybit_get_linear_prices_and_funding()
+    mp = {}
+    for sym, v in frs.items():
+        fr = v.get("funding_rate")
+        if isinstance(fr, float):
+            mp[sym] = fr  # assume 8h
+    return mp
+
+
+def fetch_bybit_next_map() -> Dict[str, int]:
+    _, frs = bybit_get_linear_prices_and_funding()
+    nxt = {}
+    for sym, v in frs.items():
+        t = v.get("next_time") or v.get("ts")
+        if isinstance(t, int):
+            nxt[sym] = t
+    return nxt
+
+def _pairwise_fr_topn(
+    left_map: Dict[str, float],
+    right_map: Dict[str, float],
+    left_to_right_mapper,
+    pair_label: str,
+    top_n: int,
+    left_next_map: Dict[str, int] | None = None,
+    right_next_map: Dict[str, int] | None = None,
+) -> List[Dict]:
+    rows: List[Dict] = []
+    left_next_map = left_next_map or {}
+    right_next_map = right_next_map or {}
+    for l_sym, l_fr in left_map.items():
+        r_sym = left_to_right_mapper(l_sym)
+        r_fr = right_map.get(r_sym)
+        if not isinstance(l_fr, float) or not isinstance(r_fr, float):
+            continue
+        diff = abs(l_fr - r_fr)
+        direction = (
+            f"LONG RIGHT / SHORT LEFT" if r_fr < l_fr else
+            f"LONG LEFT / SHORT RIGHT" if l_fr < r_fr else "FLAT"
+        )
+        rows.append({
+            "pair": pair_label,
+            "left_symbol": l_sym,
+            "right_symbol": r_sym,
+            "left_fr8": l_fr,
+            "right_fr8": r_fr,
+            "fr_diff_abs": diff,
+            "direction_hint": direction,
+            "annual_delta_pct": diff * 3 * 365 * 100.0,
+            "left_next": left_next_map.get(l_sym),
+            "right_next": right_next_map.get(r_sym),
+            "left_cd_h": (lambda ms: (f"{max(0, (ms - int(time.time()*1000)) / 3600000):.1f}h") if isinstance(ms, int) else "NA")(left_next_map.get(l_sym)),
+            "right_cd_h": (lambda ms: (f"{max(0, (ms - int(time.time()*1000)) / 3600000):.1f}h") if isinstance(ms, int) else "NA")(right_next_map.get(r_sym)),
+        })
+    rows.sort(key=lambda x: x["fr_diff_abs"], reverse=True)
+    return rows[:top_n]
+
+
+def compare_okx_bybit_topn(top_n: int = 40) -> List[Dict]:
+    okx = fetch_okx_fr8_map()
+    byb = fetch_bybit_fr8_map()
+    okx_next = fetch_okx_next_map()
+    byb_next = fetch_bybit_next_map()
+    return _pairwise_fr_topn(
+        left_map=okx,
+        right_map=byb,
+        left_to_right_mapper=lambda inst: map_okx_to_bn_symbol(inst),  # OKX base→ BASEUSDT (Bybit uses same)
+        pair_label="OKX-BYBIT",
+        top_n=top_n,
+        left_next_map=okx_next,
+        right_next_map=byb_next,
+    )
+
+
+def compare_okx_binance_topn(top_n: int = 40) -> List[Dict]:
+    okx = fetch_okx_fr8_map()
+    bn = fetch_bn_fr8_map()
+    okx_next = fetch_okx_next_map()
+    bn_next = fetch_bn_next_map()
+    return _pairwise_fr_topn(
+        left_map=okx,
+        right_map=bn,
+        left_to_right_mapper=lambda inst: map_okx_to_bn_symbol(inst),
+        pair_label="OKX-BN",
+        top_n=top_n,
+        left_next_map=okx_next,
+        right_next_map=bn_next,
+    )
+
+
+def compare_bybit_binance_topn(top_n: int = 40) -> List[Dict]:
+    byb = fetch_bybit_fr8_map()
+    bn = fetch_bn_fr8_map()
+    byb_next = fetch_bybit_next_map()
+    bn_next = fetch_bn_next_map()
+    return _pairwise_fr_topn(
+        left_map=byb,
+        right_map=bn,
+        left_to_right_mapper=lambda sym: sym,  # Bybit symbol == BN symbol for USDT perps
+        pair_label="BYBIT-BN",
+        top_n=top_n,
+        left_next_map=byb_next,
+        right_next_map=bn_next,
+    )
+
+
+def aggregate_topk_from_three(top_n_each: int = 40, top_k: int = 20) -> List[Dict]:
+    a = compare_okx_bybit_topn(top_n_each)
+    b = compare_okx_binance_topn(top_n_each)
+    c = compare_bybit_binance_topn(top_n_each)
+    merged = a + b + c
+    merged.sort(key=lambda x: x["fr_diff_abs"], reverse=True)
+    return merged[:top_k]
 
 
 if __name__ == "__main__":
