@@ -378,84 +378,84 @@ class RiskManager:
                 position_id = f"{position.call_option.symbol}_{position.put_option.symbol}"
                 
                 record_info = f"""
-=== POSITION CLOSE RECORD ===
-Time: {timestamp}
-Position Type: {position_type}
-Position ID: {position_id}
-Strategy: {position.strategy_type}
-Close Reason: {close_reason}
-Contracts: {position.contracts}
+                === POSITION CLOSE RECORD ===
+                Time: {timestamp}
+                Position Type: {position_type}
+                Position ID: {position_id}
+                Strategy: {position.strategy_type}
+                Close Reason: {close_reason}
+                Contracts: {position.contracts}
 
-Options Info:
-  Call Option: {position.call_option.symbol}
-    - Strike: ${position.call_option.strike:,.0f}
-    - Days to Expiry: {position.call_option.days_to_expiry}
-    - Entry IV: {getattr(position, 'call_option_entry_iv', 'N/A')}
-    - Current IV: {position.call_option.iv:.4f}
-    - Delta: {position.call_option.delta:+.4f}
-    
-  Put Option: {position.put_option.symbol}
-    - Strike: ${position.put_option.strike:,.0f}
-    - Days to Expiry: {position.put_option.days_to_expiry}
-    - Entry IV: {getattr(position, 'put_option_entry_iv', 'N/A')}
-    - Current IV: {position.put_option.iv:.4f}
-    - Delta: {position.put_option.delta:+.4f}
+                Options Info:
+                Call Option: {position.call_option.symbol}
+                    - Strike: ${position.call_option.strike:,.0f}
+                    - Days to Expiry: {position.call_option.days_to_expiry}
+                    - Entry IV: {getattr(position, 'call_option_entry_iv', 'N/A')}
+                    - Current IV: {position.call_option.iv:.4f}
+                    - Delta: {position.call_option.delta:+.4f}
+                    
+                Put Option: {position.put_option.symbol}
+                    - Strike: ${position.put_option.strike:,.0f}
+                    - Days to Expiry: {position.put_option.days_to_expiry}
+                    - Entry IV: {getattr(position, 'put_option_entry_iv', 'N/A')}
+                    - Current IV: {position.put_option.iv:.4f}
+                    - Delta: {position.put_option.delta:+.4f}
 
-P&L Information:
-  Unrealized P&L: {current_pnl:+.6f} BTC
-  P&L Ratio: {current_pnl_ratio:+.2%}
-  
-Entry Information:
-  Entry Spot Price: ${getattr(position, 'entry_spot_price', 'N/A')}
-  Average Entry IV: {(getattr(position, 'call_option_entry_iv', 0) + getattr(position, 'put_option_entry_iv', 0))/2:.4f}
-  Total Premium: {position.total_premium:.6f} BTC
+                P&L Information:
+                Unrealized P&L: {current_pnl:+.6f} BTC
+                P&L Ratio: {current_pnl_ratio:+.2%}
+                
+                Entry Information:
+                Entry Spot Price: ${getattr(position, 'entry_spot_price', 'N/A')}
+                Average Entry IV: {(getattr(position, 'call_option_entry_iv', 0) + getattr(position, 'put_option_entry_iv', 0))/2:.4f}
+                Total Premium: {position.total_premium:.6f} BTC
 
-Environment: {env}
-{'='*50}
+                Environment: {env}
+                {'='*50}
 
-"""
+                """
             
             elif isinstance(position, CalendarSpreadOpportunity):
                 position_type = "Calendar Spread"
                 position_id = f"{position.short_option.symbol}_{position.long_option.symbol}"
                 
                 record_info = f"""
-=== POSITION CLOSE RECORD ===
-Time: {timestamp}
-Position Type: {position_type}
-Position ID: {position_id}
-Close Reason: {close_reason}
-Contracts: {position.contracts}
+                === POSITION CLOSE RECORD ===
+                Time: {timestamp}
+                Position Type: {position_type}
+                Position ID: {position_id}
+                Close Reason: {close_reason}
+                Contracts: {position.contracts}
 
-Options Info:
-  Short Option: {position.short_option.symbol}
-    - Strike: ${position.short_option.strike:,.0f}
-    - Days to Expiry: {position.short_option.days_to_expiry}
-    - Entry IV: {getattr(position, 'short_option_entry_iv', 'N/A')}
-    - Current IV: {position.short_option.iv:.4f}
-    - Delta: {position.short_option.delta:+.4f}
-    
-  Long Option: {position.long_option.symbol}
-    - Strike: ${position.long_option.strike:,.0f}
-    - Days to Expiry: {position.long_option.days_to_expiry}
-    - Entry IV: {getattr(position, 'long_option_entry_iv', 'N/A')}
-    - Current IV: {position.long_option.iv:.4f}
-    - Delta: {position.long_option.delta:+.4f}
+                Options Info:
+                Short Option: {position.short_option.symbol}
+                    - Strike: ${position.short_option.strike:,.0f}
+                    - Days to Expiry: {position.short_option.days_to_expiry}
+                    - Entry IV: {getattr(position, 'short_option_entry_iv', 'N/A')}
+                    - Current IV: {position.short_option.iv:.4f}
+                    - Delta: {position.short_option.delta:+.4f}
+                    
+                Long Option: {position.long_option.symbol}
+                    - Strike: ${position.long_option.strike:,.0f}
+                    - Days to Expiry: {position.long_option.days_to_expiry}
+                    - Entry IV: {getattr(position, 'long_option_entry_iv', 'N/A')}
+                    - Current IV: {position.long_option.iv:.4f}
+                    - Delta: {position.long_option.delta:+.4f}
 
-P&L Information:
-  Unrealized P&L: {current_pnl:+.6f} BTC
-  P&L Ratio: {current_pnl_ratio:+.2%}
-  
-Strategy Information:
-  IV Spread: {position.iv_spread:+.4f}
-  Time Gap: {position.time_gap_days} days
-  Net Premium: {position.net_premium:+.6f} BTC
-  Signal Strength: {position.signal_strength}
+                P&L Information:
+                Unrealized P&L: {current_pnl:+.6f} BTC
+                P&L Ratio: {current_pnl_ratio:+.2%}
+                
+                Strategy Information:
+                IV Spread: {position.iv_spread:+.4f}
+                Time Gap: {position.time_gap_days} days
+                Net Premium: {position.net_premium:+.6f} BTC
+                Signal Strength: {position.signal_strength}
 
-Environment: {env}
-{'='*50}
+                Environment: {env}
+                {'='*50}
 
-"""
+                """
             
             # 写入日志文件
             with open(position_close_log, 'a', encoding='utf-8') as f:
