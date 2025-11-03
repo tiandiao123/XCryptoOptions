@@ -59,25 +59,6 @@ def get_bid_ask(instId: str) -> Optional[Dict]:
     except Exception:
         return None
 
-def get_multiple_bid_ask(instIds: List[str]) -> Dict[str, Dict]:
-    """
-    Get bid-1 and ask-1 for multiple contracts
-    
-    Args:
-        instIds: List of contract IDs
-        
-    Returns:
-        dict mapping instId to bid/ask data
-    """
-    results = {}
-    
-    for instId in instIds:
-        data = get_bid_ask(instId)
-        if data:
-            results[instId] = data
-    
-    return results
-
 def print_bid_ask(instId: str):
     """Print bid-1 and ask-1 in a clean format"""
     data = get_bid_ask(instId)
@@ -88,28 +69,15 @@ def print_bid_ask(instId: str):
         print(f"{instId}: Failed to get data")
         return None
 
-# Quick access functions
-def btc_bid_ask():
-    """Get BTC-USD-SWAP bid/ask"""
-    return get_bid_ask("BTC-USD-SWAP")
-
-def eth_bid_ask():
-    """Get ETH-USD-SWAP bid/ask"""
-    return get_bid_ask("ETH-USD-SWAP")
-
 if __name__ == "__main__":
     # Demo usage
     print("=== Simple Orderbook Demo ===")
     
     # Single contract
-    btc_data = btc_bid_ask()
+    btc_data = get_bid_ask(instId="BTC-USD-SWAP")
     if btc_data:
         print(f"BTC: ${btc_data['bid']:,.1f} / ${btc_data['ask']:,.1f}")
+
     
-    # Multiple contracts
-    contracts = ["BTC-USD-SWAP", "ETH-USD-SWAP"]
-    all_data = get_multiple_bid_ask(contracts)
-    
-    print("\nAll Contracts:")
-    for instId, data in all_data.items():
-        print(f"  {instId}: ${data['bid']:,.1f} / ${data['ask']:,.1f}")
+    print_bid_ask("BTC-USDT-SWAP")
+    print_bid_ask("ETH-USDT-SWAP")

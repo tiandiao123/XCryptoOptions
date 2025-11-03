@@ -5,12 +5,18 @@ Leverage Management Functions for OKX API
 Handles getting and setting leverage for inverse perpetual contracts
 """
 import os, time, json, hmac, base64, hashlib, requests
+from urllib.parse import urlencode
 from typing import Optional, Dict, Any, List
 
-from qtrade.order_api.okx_order_placer import API_KEY, API_SECRET, API_PASSPHRASE
+from qtrade.order_api.okx import API_KEY, API_SECRET, API_PASSPHRASE
 
 OKX_BASE_URL = "https://www.okx.com"
-SIM_HEADER = {"x-simulated-trading": "1"}  # route to DEMO
+# Default to LIVE. Set OKX_SIMULATED=1 to use demo.
+USE_SIMULATED = os.getenv("OKX_SIMULATED", "0") == "1"
+SIM_HEADER = {"x-simulated-trading": "1"} if USE_SIMULATED else {}
+
+# Valid margin modes guard
+VALID_MGN_MODES = {"cross", "isolated"}
 
 def rfc3339():
     return time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime())
@@ -35,7 +41,7 @@ def okx_get(path: str, params: Dict[str, Any] = None) -> Dict[str, Any]:
     ts = rfc3339()
     query_string = ""
     if params:
-        query_string = "&".join([f"{k}={v}" for k, v in params.items()])
+        query_string = urlencode(params)
         path_with_query = f"{path}?{query_string}"
     else:
         path_with_query = path
@@ -87,6 +93,8 @@ def get_account_leverage_info(instId: Optional[str] = None, mgnMode: str = "cros
     
     try:
         # 构建查询参数
+        if mgnMode not in VALID_MGN_MODES:
+            raise ValueError(f"Invalid mgnMode: {mgnMode}. Use 'cross' or 'isolated'.")
         params = {"mgnMode": mgnMode}
         if instId:
             params["instId"] = instId
@@ -181,125 +189,22 @@ def set_leverage(instId: str, lever: int, mgnMode: str = "cross", posSide: Optio
         print(f"❌ 设置杠杆时出错: {e}")
         return {"error": str(e)}
 
-def set_leverage_cross_inverse(ccy: str, lever: int = 1, posSide: Optional[str] = None):
-    """
-    为反向永续合约设置全仓杠杆
-    Args:
-        ccy: 保证金货币，BTC-USD-SWAP -> "BTC", ETH-USD-SWAP -> "ETH"
-        lever: 杠杆倍数
-        posSide: 仓位方向（hedge模式下需要）
-    """
-    print(f"⚙️ 设置 {ccy} 反向合约全仓杠杆为 {lever}x...")
-    
-    payload = {
-        "mgnMode": "cross",
-        "ccy": ccy.upper(),
-        "lever": str(lever),
-    }
-    
-    if posSide:
-        payload["posSide"] = posSide
-    
-    try:
-        result = okx_post("/api/v5/account/set-leverage", payload)
-        
-        if result.get("code") == "0":
-            print(f"✅ {ccy} 反向合约杠杆设置成功: {lever}x")
-            return result
-        else:
-            print(f"❌ {ccy} 反向合约杠杆设置失败: {result}")
-            return result
-            
-    except Exception as e:
-        print(f"❌ 设置 {ccy} 反向合约杠杆时出错: {e}")
-        return {"error": str(e)}
-
-def get_position_mode():
-    """
-    获取账户仓位模式（net模式 或 hedge模式）
-    Returns:
-        dict: 仓位模式信息
-    """
-    print(f"🔍 获取账户仓位模式...")
-    
-    try:
-        data = okx_get("/api/v5/account/config")
-        
-        config_data = data.get("data", [])
-        if config_data:
-            config = config_data[0]
-            pos_mode = config.get("posMode")
-            auto_loan = config.get("autoLoan")
-            
-            print(f"📊 账户配置:")
-            print(f"  🎯 仓位模式: {pos_mode} ({'双向持仓' if pos_mode == 'long_short_mode' else '单向持仓'})")
-            print(f"  💰 自动借币: {auto_loan}")
-            
-            return config
-        else:
-            print(f"❌ 获取账户配置失败")
-            return None
-            
-    except Exception as e:
-        print(f"❌ 获取仓位模式时出错: {e}")
-        return None
-
-def demo_leverage_management():
-    """演示杠杆管理功能"""
-    print("🚀 杠杆管理演示...")
-    print("=" * 50)
-    
-    # 1. 获取账户配置
-    print("\n1️⃣ 获取账户配置")
-    config = get_position_mode()
-    
-    # 2. 获取当前杠杆信息
-    print("\n2️⃣ 获取当前杠杆信息")
-    leverage_info = get_account_leverage_info()
-    
-    # 3. 获取BTC合约的杠杆
-    print("\n3️⃣ 获取BTC-USD-SWAP杠杆")
-    btc_leverage = get_current_leverage("BTC-USD-SWAP")
-    
-    # 4. 设置杠杆（演示，不实际执行）
-    print("\n4️⃣ 杠杆设置示例（未实际执行）")
-    print("  📝 设置BTC-USD-SWAP杠杆为5x:")
-    print("     set_leverage('BTC-USD-SWAP', 5)")
-    print("  📝 设置BTC全仓杠杆为3x:")
-    print("     set_leverage_cross_inverse('BTC', 3)")
-    
-    return {
-        "config": config,
-        "leverage_info": leverage_info,
-        "btc_leverage": btc_leverage
-    }
-
-# 快速访问函数
-def btc_leverage():
-    """获取BTC-USD-SWAP当前杠杆"""
-    return get_current_leverage("BTC-USD-SWAP")
-
-def eth_leverage():
-    """获取ETH-USD-SWAP当前杠杆"""
-    return get_current_leverage("ETH-USD-SWAP")
-
-def set_btc_leverage(lever: int):
-    """设置BTC-USD-SWAP杠杆"""
-    return set_leverage("BTC-USD-SWAP", lever)
-
-def set_eth_leverage(lever: int):
-    """设置ETH-USD-SWAP杠杆"""
-    return set_leverage("ETH-USD-SWAP", lever)
 
 if __name__ == "__main__":
-    # 运行演示
-    demo_result = demo_leverage_management()
-    
-    print("\n✅ 杠杆管理功能演示完成!")
-    print("📝 可用的主要函数:")
-    print("  - get_current_leverage(instId)")
-    print("  - set_leverage(instId, lever)")
-    print("  - get_account_leverage_info()")
-    print("  - get_position_mode()")
-    print("  - btc_leverage(), eth_leverage()")
-    print("  - set_btc_leverage(lever), set_eth_leverage(lever)")
+
+    print(get_current_leverage("BTC-USD-SWAP", mgnMode="cross")) 
+    print(get_current_leverage("ETH-USD-SWAP", mgnMode="isolated"))
+
+
+    set_leverage("BTC-USD-SWAP", 10, mgnMode="cross")
+    set_leverage("ETH-USD-SWAP", 10, mgnMode="isolated")
+
+    print(get_current_leverage("BTC-USD-SWAP", mgnMode="cross")) 
+    print(get_current_leverage("ETH-USD-SWAP", mgnMode="isolated"))
+
+
+    get_account_leverage_info(instId="BTC-USD-SWAP", mgnMode="cross")
+
+
+
+

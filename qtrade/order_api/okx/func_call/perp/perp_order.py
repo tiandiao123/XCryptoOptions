@@ -2,13 +2,14 @@
 import os, time, json, hmac, base64, hashlib, argparse, requests
 from typing import Optional, Dict, Any
 
-from qtrade.order_api.okx_order_placer.utils import get_current_btc_price, get_instrument_details
+from qtrade.order_api.okx.func_call.perp.perp_orderbook import get_bid_ask
+from qtrade.order_api.okx.func_call.utils import get_current_btc_price, get_instrument_details
 
 OKX_BASE_URL = "https://www.okx.com"  # demo vs live decided by header
 SIM_HEADER = {"x-simulated-trading": "1"}  # route to DEMO
 
 
-from qtrade.order_api.okx_order_placer import API_KEY, API_SECRET, API_PASSPHRASE
+from qtrade.order_api.okx import API_KEY, API_SECRET, API_PASSPHRASE
 
 
 def rfc3339():
@@ -45,22 +46,7 @@ def okx_post(path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         raise RuntimeError(f"OKX error {data.get('code')}: {data.get('msg')} | data={data}")
     return data
 
-def set_leverage_cross_inverse(ccy: str, lever: int = 1, posSide: Optional[str] = None):
-    """
-    Cross margin leverage for inverse perps uses the margin currency as `ccy`:
-      BTC-USD-SWAP -> ccy="BTC"
-      ETH-USD-SWAP -> ccy="ETH"
-    """
-    payload = {
-        "mgnMode": "cross",
-        "ccy": ccy.upper(),
-        "lever": str(lever),
-    }
-    # If your account is in hedge mode, OKX may require posSide ("long"/"short") for isolated,
-    # but for cross it's optional. We include only if provided.
-    if posSide:
-        payload["posSide"] = posSide
-    return okx_post("/api/v5/account/set-leverage", payload)
+
 
 def place_inverse_perp_order(
     instId: str,
@@ -570,7 +556,6 @@ def place_limit_order_relative_to_book(
     Returns:
         dict: 订单信息，包含orderId
     """
-    from qtrade.demo_trade.order_placer.orderbook import get_bid_ask
     
     print(f"📊 基于订单簿下{side}单...")
     
@@ -656,3 +641,7 @@ def demo_order_management():
     return order_info
 
 # write a function place limit order based on ask-1 and bid-1
+
+
+if __name__ == "__main__":
+    pass 

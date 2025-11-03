@@ -16,10 +16,10 @@ from pathlib import Path
 # 添加项目路径
 sys.path.append('/home/ubuntu/options_trading')
 
-from qtrade.optionstrader.arbitrage_searcher.gamma_scalping.atm_options_filter import (
+from qtrade.cryptotrader.arbitrage_searcher.gamma_scalping.atm_options_filter import (
     get_straddle_atm_options, OptionData
 )
-from qtrade.optionstrader.arbitrage_searcher.gamma_scalping.ewma_vol_tracker import RealDataEWMAVolTracker
+from qtrade.cryptotrader.arbitrage_searcher.gamma_scalping.ewma_vol_tracker import RealDataEWMAVolTracker
 
 
 @dataclass

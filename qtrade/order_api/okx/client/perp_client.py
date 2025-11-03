@@ -1,4 +1,5 @@
 import time
+import os
 import json
 import hmac
 import base64
@@ -7,8 +8,10 @@ from datetime import datetime, timezone
 from typing import Any, Dict, Optional, Tuple, List
 
 import requests
+from decimal import Decimal, ROUND_DOWN
 
 OKX_BASE = "https://www.okx.com"
+USE_SIMULATED = os.getenv("OKX_SIMULATED", "0") == "1"  # default LIVE; set 1 for demo
 
 
 def _rfc3339_now_ms() -> str:
@@ -30,13 +33,16 @@ class OKXFuturesClient:
         return base64.b64encode(digest).decode()
 
     def _headers(self, timestamp: str, signature: str) -> Dict[str, str]:
-        return {
+        headers = {
             "OK-ACCESS-KEY": self.api_key,
             "OK-ACCESS-SIGN": signature,
             "OK-ACCESS-TIMESTAMP": timestamp,
             "OK-ACCESS-PASSPHRASE": self.passphrase,
             "Content-Type": "application/json",
         }
+        if USE_SIMULATED:
+            headers["x-simulated-trading"] = "1"
+        return headers
 
     def _request(self, method: str, path: str, params: Optional[Dict[str, Any]] = None, signed: bool = False):
         url = f"{OKX_BASE}{path}"
@@ -75,6 +81,53 @@ class OKXFuturesClient:
         last = arr[0].get("last") or arr[0].get("markPx")
         return float(last)
 
+    def get_instrument_info(self, inst_id: str) -> Dict[str, Any]:
+        """Fetch instrument meta including ctVal, ctValCcy, lotSz, minSz."""
+        data = self._request("GET", "/api/v5/public/instruments", params={"instType": "SWAP", "instId": inst_id}, signed=False)
+        arr = (data or {}).get("data", [])
+        return arr[0] if arr else {}
+
+    def _contracts_from_usdt(self, inst_id: str, notional_usdt: float, price: Optional[float] = None) -> str:
+        """Convert USDT notional to contract size respecting lot/min size.
+
+        Uses Decimal precision and floors to the nearest lot size; raises if below minSz.
+        Returns a string suitable for API `sz` (can be fractional, e.g., 0.01).
+        """
+        if notional_usdt <= 0:
+            raise ValueError("notional_usdt must be > 0")
+        info = self.get_instrument_info(inst_id)
+        if not info:
+            raise ValueError(f"No instrument info for {inst_id}")
+
+        ct_val = Decimal(str(info.get("ctVal") or "0"))
+        ct_ccy = (info.get("ctValCcy") or "").upper()
+        lot_sz = Decimal(str(info.get("lotSz") or "1"))
+        min_sz = Decimal(str(info.get("minSz") or str(lot_sz)))
+
+        if ct_ccy == "USDT":
+            contracts = Decimal(str(notional_usdt)) / ct_val
+        else:
+            if price is None:
+                price = self.get_symbol_price(inst_id)
+            contracts = Decimal(str(notional_usdt)) / (Decimal(str(price)) * ct_val)
+        
+        print(f"contracts: {contracts}")
+        print(f"ct_val: {ct_val}, ct_ccy: {ct_ccy}, lot_sz: {lot_sz}, min_sz: {min_sz}")
+        print(f"notional_usdt: {notional_usdt}, price: {price}")
+
+        # floor to lot multiple
+        steps = (contracts / lot_sz).to_integral_value(rounding=ROUND_DOWN)
+        contracts_q = steps * lot_sz
+
+        print(f"contracts_q: {contracts_q}")
+
+        if contracts_q < min_sz:
+            raise ValueError("Notional too small to satisfy minSz for this instrument")
+
+        # format with the same precision as lot size
+        precision = max(0, -lot_sz.as_tuple().exponent)
+        return f"{contracts_q:.{precision}f}"
+
     # ---------- Trading (USDT-M SWAP) ----------
     def place_market_order(self, inst_id: str, side: str, sz: str, td_mode: str = "cross", reduce_only: bool = False, pos_side: Optional[str] = None, cl_ord_id: Optional[str] = None):
         payload: Dict[str, Any] = {
@@ -91,6 +144,22 @@ class OKXFuturesClient:
         if cl_ord_id:
             payload["clOrdId"] = cl_ord_id
         return self._request("POST", "/api/v5/trade/order", params=payload, signed=True)
+
+    def place_market_order_usdt(self, 
+                            inst_id: str, 
+                            side: str, 
+                            notional_usdt: float, 
+                            td_mode: str = "cross", 
+                            reduce_only: bool = False, 
+                            pos_side: Optional[str] = None, 
+                            cl_ord_id: Optional[str] = None
+                            ):
+        """Place a market order sized by USDT notional.
+
+        Computes contract size from notional using ctVal and current price.
+        """
+        contracts = self._contracts_from_usdt(inst_id=inst_id, notional_usdt=notional_usdt)
+        return self.place_market_order(inst_id=inst_id, side=side, sz=contracts, td_mode=td_mode, reduce_only=reduce_only, pos_side=pos_side, cl_ord_id=cl_ord_id)
 
     def place_limit_order(self, inst_id: str, side: str, sz: str, px: float, td_mode: str = "cross", time_in_force: str = "GTC", reduce_only: bool = False, pos_side: Optional[str] = None, cl_ord_id: Optional[str] = None):
         payload: Dict[str, Any] = {
@@ -109,6 +178,42 @@ class OKXFuturesClient:
         if cl_ord_id:
             payload["clOrdId"] = cl_ord_id
         return self._request("POST", "/api/v5/trade/order", params=payload, signed=True)
+
+    def place_limit_order_usdt(self, inst_id: str, side: str, notional_usdt: float, px: float, td_mode: str = "cross", time_in_force: str = "GTC", reduce_only: bool = False, pos_side: Optional[str] = None, cl_ord_id: Optional[str] = None):
+        """Place a limit order sized by USDT notional at price px."""
+        contracts = self._contracts_from_usdt(inst_id=inst_id, notional_usdt=notional_usdt, price=px)
+        return self.place_limit_order(inst_id=inst_id, side=side, sz=contracts, px=px, td_mode=td_mode, time_in_force=time_in_force, reduce_only=reduce_only, pos_side=pos_side, cl_ord_id=cl_ord_id)
+
+    # ---------- Convenience: return ordId directly ----------
+    @staticmethod
+    def _ord_id_or_raise(resp: Dict[str, Any]) -> str:
+        code = str((resp or {}).get("code"))
+        if code != "0":
+            data0 = ((resp or {}).get("data") or [{}])[0]
+            s_code = data0.get("sCode")
+            s_msg = data0.get("sMsg")
+            raise RuntimeError(f"Order failed: code={code}, sCode={s_code}, sMsg={s_msg}")
+        data0 = ((resp or {}).get("data") or [{}])[0]
+        ord_id = data0.get("ordId")
+        if not ord_id:
+            raise RuntimeError("Empty ordId in success response")
+        return ord_id
+
+    def place_market_order_id(self, *args, **kwargs) -> str:
+        resp = self.place_market_order(*args, **kwargs)
+        return self._ord_id_or_raise(resp)
+
+    def place_limit_order_id(self, *args, **kwargs) -> str:
+        resp = self.place_limit_order(*args, **kwargs)
+        return self._ord_id_or_raise(resp)
+
+    def place_market_order_usdt_id(self, *args, **kwargs) -> str:
+        resp = self.place_market_order_usdt(*args, **kwargs)
+        return self._ord_id_or_raise(resp)
+
+    def place_limit_order_usdt_id(self, *args, **kwargs) -> str:
+        resp = self.place_limit_order_usdt(*args, **kwargs)
+        return self._ord_id_or_raise(resp)
 
     def cancel_order(self, inst_id: str, ord_id: Optional[str] = None, cl_ord_id: Optional[str] = None):
         payload: Dict[str, Any] = {"instId": inst_id}
@@ -167,22 +272,21 @@ def create_okx_client(api_key: str, api_secret: str, passphrase: str) -> OKXFutu
 
 
 if __name__ == "__main__":
+    from qtrade.order_api.okx import API_KEY, API_SECRET, API_PASSPHRASE
 
-    client = create_okx_client(api_key="YOUR_KEY", api_secret="YOUR_SECRET", passphrase="YOUR_PASSPHRASE")
+    client = create_okx_client(api_key=API_KEY, api_secret=API_SECRET, passphrase=API_PASSPHRASE)
 
     # Market buy 1 contract BTC-USDT-SWAP (size is contract qty)
     # print(client.place_market_order(inst_id="BTC-USDT-SWAP", side="buy", sz="1"))
 
-    # Limit sell
-    # print(client.place_limit_order(inst_id="BTC-USDT-SWAP", side="sell", sz="1", px=70000))
+    # Limit buy 
 
-    # Cancel
-    # print(client.cancel_order(inst_id="BTC-USDT-SWAP", ord_id="123456789"))
+    resp = client.place_limit_order_usdt(inst_id="BTC-USDT-SWAP", side="buy", notional_usdt=300, px=70000, td_mode="isolated")
 
-    # Cancel all pending
-    # print(client.cancel_all_open_orders(inst_id="BTC-USDT-SWAP"))
 
-    # Close position
-    # print(client.close_position_market(inst_id="BTC-USDT-SWAP"))
+    ord_id = OKXFuturesClient._ord_id_or_raise(resp)
+    print(f"Order placed with ID: {ord_id}")
+
+    
 
 

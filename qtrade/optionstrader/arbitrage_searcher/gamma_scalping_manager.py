@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-Gamma Scalping Manager - Selling Straddle机会监控管理器
-基于calendar_spread_manager.py设计，专门用于监控Selling Straddle套利机会
+OKX Gamma Scalping Manager - Selling Straddle机会监控管理器
+专门针对OKX交易所的Selling Straddle套利机会监控
 """
 
 import time
@@ -11,51 +11,53 @@ from typing import List, Dict, Any
 import logging
 from dataclasses import dataclass
 
-# 导入我们的Gamma Scalping模块
-from qtrade.optionstrader.arbitrage_searcher.gamma_scalping.selling_straddle_finder import (
-    SellingStraddleFinder,
-    StraddleOpportunity
+# 导入OKX Gamma Scalping模块
+from qtrade.optionstrader.arbitrage_searcher.gamma_scalping.selling_straddle_finder_okx import (
+    SellingStraddleFinderOKX,
+    StraddleOpportunityOKX
 )
 
 
 @dataclass
-class GammaScalpingSignal:
-    """Gamma Scalping信号数据结构"""
+class GammaScalpingSignalOKX:
+    """OKX Gamma Scalping信号数据结构"""
     signal_id: str
     timestamp: datetime
     signal_type: str  # "selling_straddle"
-    opportunity: StraddleOpportunity
+    opportunity: StraddleOpportunityOKX
     confidence: float  # 0.0-1.0
     market_conditions: Dict[str, Any]
+    exchange: str = "OKX"
 
 
-class GammaScalpingManager:
+class GammaScalpingManagerOKX:
     """
-    Gamma Scalping - Selling Straddle套利机会管理器
+    OKX Gamma Scalping - Selling Straddle套利机会管理器
     
     功能：
-    1. 每5分钟检查一次Selling Straddle机会
+    1. 每5分钟检查一次OKX Selling Straddle机会
     2. 缓存和去重机会
     3. 生成交易信号
     4. 日志记录和监控
     """
     
-    def __init__(self, config_path: str, env: str = "testnet"):
+    def __init__(self, config_path: str, currency: str = "BTC"):
         """
-        初始化Gamma Scalping管理器
+        初始化OKX Gamma Scalping管理器
         
         Args:
             config_path: 配置文件路径
-            env: 交易环境 (testnet/mainnet)
+            currency: 币种 (默认BTC)
         """
-        self.env = env
+        self.exchange = "OKX"
+        self.currency = currency
         self.is_running = False
         self.monitor_thread = None
         self.check_interval = 300  # 5分钟 = 300秒
         
         # 信号缓存
-        self.recent_signals: List[GammaScalpingSignal] = []
-        self.signal_history: List[GammaScalpingSignal] = []
+        self.recent_signals: List[GammaScalpingSignalOKX] = []
+        self.signal_history: List[GammaScalpingSignalOKX] = []
         self.max_recent_signals = 10  # 最多保留10个最近信号
         
         # 统计信息
@@ -64,30 +66,30 @@ class GammaScalpingManager:
         self.last_check_time = None
         self.last_opportunity_time = None
         
-        # 初始化Selling Straddle寻找器
-        self.straddle_finder = SellingStraddleFinder(
-            currency="BTC",
-            env=self.env,
-            config_path=config_path
-        )
-    
-        # 设置日志
+        # 先设置日志
         self._setup_logging()
         
-        self.logger.info(f"🚀 Gamma Scalping Manager 初始化完成")
-        self.logger.info(f"   环境: {env}")
+        # 初始化OKX Selling Straddle寻找器
+        self.straddle_finder = SellingStraddleFinderOKX(
+            config_path=config_path,
+            currency=self.currency
+        )
+        
+        self.logger.info(f"🚀 [OKX] Gamma Scalping Manager 初始化完成")
+        self.logger.info(f"   交易所: {self.exchange}")
+        self.logger.info(f"   币种: {self.currency}")
         self.logger.info(f"   检查间隔: {self.check_interval}秒")
     
     def _setup_logging(self):
         """设置日志"""
-        self.logger = logging.getLogger("GammaScalpingManager")
+        self.logger = logging.getLogger("GammaScalpingManagerOKX")
         self.logger.setLevel(logging.INFO)
         
         # 避免重复添加handler
         if not self.logger.handlers:
             handler = logging.StreamHandler()
             formatter = logging.Formatter(
-                '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+                '%(asctime)s - [OKX] %(name)s - %(levelname)s - %(message)s'
             )
             handler.setFormatter(formatter)
             self.logger.addHandler(handler)
@@ -102,7 +104,7 @@ class GammaScalpingManager:
         self.monitor_thread = threading.Thread(target=self._monitor_loop, daemon=True)
         self.monitor_thread.start()
         
-        self.logger.info("🚀 Gamma Scalping监控已启动")
+        self.logger.info("🚀 [OKX] Gamma Scalping监控已启动")
         self.logger.info(f"   检查间隔: {self.check_interval}秒")
     
     def stop_monitoring(self):
@@ -115,7 +117,7 @@ class GammaScalpingManager:
         if self.monitor_thread:
             self.monitor_thread.join(timeout=10)
         
-        self.logger.info("🛑 Gamma Scalping监控已停止")
+        self.logger.info("🛑 [OKX] Gamma Scalping监控已停止")
     
     def _monitor_loop(self):
         """监控循环"""
@@ -138,9 +140,9 @@ class GammaScalpingManager:
                 self.logger.error(f"❌ 监控循环出错: {e}")
                 time.sleep(60)  # 出错后等待1分钟再继续
     
-    def check_opportunities(self) -> List[StraddleOpportunity]:
+    def check_opportunities(self) -> List[StraddleOpportunityOKX]:
         """
-        检查Selling Straddle机会
+        检查OKX Selling Straddle机会
         
         Returns:
             找到的机会列表，如果没有则返回空列表
@@ -148,7 +150,7 @@ class GammaScalpingManager:
         self.total_checks += 1
         self.last_check_time = datetime.now()
         
-        self.logger.info(f"🔍 第{self.total_checks}次检查Selling Straddle机会...")
+        self.logger.info(f"🔍 [OKX] 第{self.total_checks}次检查Selling Straddle机会...")
 
         
         # 寻找机会
@@ -158,7 +160,7 @@ class GammaScalpingManager:
             self.total_opportunities_found += len(opportunities)
             self.last_opportunity_time = datetime.now()
             
-            self.logger.info(f"✅ 找到 {len(opportunities)} 个Selling Straddle机会")
+            self.logger.info(f"✅ [OKX] 找到 {len(opportunities)} 个Selling Straddle机会")
             
             # 简要显示机会
             for i, opp in enumerate(opportunities, 1):
@@ -169,12 +171,12 @@ class GammaScalpingManager:
             
             return opportunities
         else:
-            self.logger.info("📊 当前没有找到合适的Selling Straddle机会")
+            self.logger.info("📊 [OKX] 当前没有找到合适的Selling Straddle机会")
             return []
 
 
-    def _generate_signals(self, opportunities: List[StraddleOpportunity]) -> List[GammaScalpingSignal]:
-        """生成交易信号"""
+    def _generate_signals(self, opportunities: List[StraddleOpportunityOKX]) -> List[GammaScalpingSignalOKX]:
+        """生成OKX交易信号"""
         signals = []
         current_time = datetime.now()
         
@@ -184,35 +186,36 @@ class GammaScalpingManager:
             
             # 收集市场条件
             market_conditions = {
+                "exchange": "OKX",
                 "spot_price": getattr(opp, 'spot_price', 0),
                 "realized_vol": opp.realized_vol,
                 "avg_iv": opp.avg_iv,
                 "iv_premium": opp.iv_premium,
                 "iv_premium_pct": opp.iv_premium_pct,
                 "net_delta": opp.net_delta,
-                "net_delta_adjusted": opp.net_delta_adjusted,
                 "total_gamma": opp.total_gamma,
                 "total_theta": opp.total_theta,
                 "signal_strength": opp.signal_strength
             }
             
             # 生成信号ID
-            signal_id = f"straddle_{opp.strike_price}_{opp.days_to_expiry}_{current_time.strftime('%Y%m%d_%H%M%S')}"
+            signal_id = f"OKX_straddle_{opp.strike_price}_{opp.days_to_expiry}_{current_time.strftime('%Y%m%d_%H%M%S')}"
             
-            signal = GammaScalpingSignal(
+            signal = GammaScalpingSignalOKX(
                 signal_id=signal_id,
                 timestamp=current_time,
                 signal_type="selling_straddle",
                 opportunity=opp,
                 confidence=confidence,
-                market_conditions=market_conditions
+                market_conditions=market_conditions,
+                exchange="OKX"
             )
             
             signals.append(signal)
         
         return signals
     
-    def _calculate_confidence(self, opportunity: StraddleOpportunity) -> float:
+    def _calculate_confidence(self, opportunity: StraddleOpportunityOKX) -> float:
         """计算信号置信度"""
         confidence = 0.0
         
@@ -237,7 +240,7 @@ class GammaScalpingManager:
         
         return min(confidence, 1.0)
     
-    def _process_signals(self, signals: List[GammaScalpingSignal]):
+    def _process_signals(self, signals: List[GammaScalpingSignalOKX]):
         """处理信号"""
         for signal in signals:
             # 检查是否重复
@@ -256,7 +259,7 @@ class GammaScalpingManager:
                 self.logger.info(f"   执行价: ${signal.opportunity.strike_price:,.0f}")
                 self.logger.info(f"   IV溢价: {signal.opportunity.iv_premium_pct:+.1f}%")
     
-    def _is_duplicate_signal(self, new_signal: GammaScalpingSignal) -> bool:
+    def _is_duplicate_signal(self, new_signal: GammaScalpingSignalOKX) -> bool:
         """检查是否为重复信号"""
         # 检查最近1小时内是否有相同执行价和到期日的信号
         cutoff_time = datetime.now() - timedelta(hours=1)
@@ -269,7 +272,7 @@ class GammaScalpingManager:
         
         return False
     
-    def get_recent_signals(self, hours: int = 24) -> List[GammaScalpingSignal]:
+    def get_recent_signals(self, hours: int = 24) -> List[GammaScalpingSignalOKX]:
         """获取最近的信号"""
         cutoff_time = datetime.now() - timedelta(hours=hours)
         return [s for s in self.signal_history if s.timestamp > cutoff_time]
@@ -296,8 +299,10 @@ class GammaScalpingManager:
         stats = self.get_statistics()
         recent_signals = self.get_recent_signals(24)
         
-        print(f"\n📊 Gamma Scalping Manager 状态报告")
+        print(f"\n📊 [OKX] Gamma Scalping Manager 状态报告")
         print(f"="*60)
+        print(f"🌐 交易所: {self.exchange}")
+        print(f"💰 币种: {self.currency}")
         print(f"🔄 运行状态: {'运行中' if stats['is_running'] else '已停止'}")
         print(f"🔍 总检查次数: {stats['total_checks']}")
         print(f"🎯 总机会数: {stats['total_opportunities_found']}")
@@ -321,16 +326,23 @@ class GammaScalpingManager:
                       f"置信度{signal.confidence:.2f}")
 
 
+# 便捷函数
+def create_okx_gamma_manager(config_path: str = None, currency: str = "BTC") -> GammaScalpingManagerOKX:
+    """创建OKX Gamma Scalping管理器"""
+    if config_path is None:
+        config_path = "/home/ubuntu/options_trading/qtrade/optionstrader/arbitrage_searcher/calendar_spread/calendar_spread.yaml"
+    return GammaScalpingManagerOKX(config_path=config_path, currency=currency)
+
+
 # 测试函数
-def test_gamma_scalping_manager():
-    """测试Gamma Scalping Manager"""
+def test_gamma_scalping_manager_okx():
+    """测试OKX Gamma Scalping Manager"""
     
-    print("🚀 Gamma Scalping Manager 测试")
+    print("🚀 [OKX] Gamma Scalping Manager 测试")
     print("="*60)
     
     # 初始化管理器
-    manager = GammaScalpingManager(config_path="/home/ubuntu/options_trading/qtrade/cryptotrader/arbitrage_searcher/gamma_scalping/selling_straddle.yaml",
-                                    env="mainnet")
+    manager = create_okx_gamma_manager(currency="BTC")
     
     # 测试单次检查
     print("\n🔍 测试单次机会检查...")
@@ -358,4 +370,4 @@ def test_gamma_scalping_manager():
 
 
 if __name__ == "__main__":
-    test_gamma_scalping_manager()
+    test_gamma_scalping_manager_okx()

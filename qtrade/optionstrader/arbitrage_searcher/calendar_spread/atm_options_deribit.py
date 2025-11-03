@@ -1,68 +1,14 @@
 import yaml
 import numpy as np
-from dataclasses import dataclass
 from datetime import datetime
 from typing import List, Dict, Any
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from qtrade.order_api.deribit_order_placer.options_orderbook import (
+from qtrade.optionstrader.arbitrage_searcher.option_data import OptionData
+from qtrade.order_api.deribit.options_orderbook import (
     get_index_price,
     list_live_options,
     _get,
     DERIBIT_BASE
 )
-
-@dataclass
-class OptionData:
-    """期权数据结构"""
-    symbol: str
-    strike: float
-    expiry: str
-    days_to_expiry: int
-    option_type: str  # 'C' or 'P'
-    iv: float
-    bid: float
-    ask: float
-    mid_price: float
-    delta: float
-    net_delta: float  # 添加Net Delta近似值
-    gamma: float
-    vega: float
-    theta: float
-    rho: float
-    open_interest: int = 0
-    
-    def __str__(self) -> str:
-        """格式化显示期权信息"""
-        return (f"{self.symbol} | "
-                f"Strike: ${self.strike:,.0f} | "
-                f"Type: {self.option_type} | "
-                f"DTE: {self.days_to_expiry}d | "
-                f"IV: {self.iv:.1%} | "
-                f"Mid: {self.mid_price:.4f} | "
-                f"Δ: {self.delta:.3f}")
-    
-    def print_detailed(self) -> None:
-        """打印详细期权信息"""
-        print(f"📊 期权详情: {self.symbol}")
-        print(f"   🎯 执行价: ${self.strike:,.0f}")
-        print(f"   📅 到期: {self.expiry} ({self.days_to_expiry}天)")
-        print(f"   🔄 类型: {'看涨期权' if self.option_type == 'C' else '看跌期权'}")
-        print(f"   💰 价格: Bid={self.bid:.4f}, Ask={self.ask:.4f}, Mid={self.mid_price:.4f}")
-        print(f"   📈 波动率: {self.iv:.1%}")
-        print(f"   🏛️ 持仓量: {self.open_interest}")
-        print(f"   📊 希腊字母:")
-        print(f"      Delta (Δ): {self.delta:+.3f}")
-        print(f"      Net Delta: {self.net_delta:+.3f}")
-        print(f"      Gamma (Γ): {self.gamma:+.3f}")
-        print(f"      Vega (ν):  {self.vega:+.3f}")
-        print(f"      Theta (Θ): {self.theta:+.3f}")
-        print(f"      Rho (ρ):   {self.rho:+.3f}")
-    
-    def print_summary(self) -> None:
-        """打印简要信息"""
-        print(f"📋 {self.symbol}")
-        print(f"   ${self.strike:,.0f} {self.option_type} | {self.days_to_expiry}d | "
-              f"IV:{self.iv:.1%} | Mid:{self.mid_price:.4f} | Δ:{self.delta:.3f}")
 
 
 def get_atm_options(config: Dict[str, Any], currency: str = "BTC", env: str = "testnet") -> List[OptionData]:

@@ -1,34 +1,12 @@
 import numpy as np
 from typing import List, Dict, Any, Tuple
 from dataclasses import dataclass
-
 import yaml
 
 # 导入ATM期权筛选器
-from qtrade.optionstrader.arbitrage_searcher.calendar_spread.atm_options_filter import (
-    OptionData, 
-    get_atm_options
-)
-
-@dataclass
-class CalendarSpreadOpportunity:
-    """Calendar Spread机会数据结构"""
-    rank: int
-    short_option: OptionData  # 卖出的短期期权
-    long_option: OptionData   # 买入的长期期权
-    iv_spread: float          # IV价差
-    iv_spread_pct: float      # IV价差百分比
-    time_gap_days: int        # 时间间隔（天）
-    net_premium: float        # 净保险费（负数表示支出）
-    max_profit_potential: float  # 最大盈利潜力
-    signal_strength: str      # 信号强度：WEAK, MODERATE, STRONG
-
-    # 🆕 开仓时的IV记录
-    short_option_entry_iv: float = 0.0
-    long_option_entry_iv: float = 0.0
-
-    open_status: bool = False  # 是否持仓
-    contracts: float = 0.0 # 持仓大小
+from qtrade.optionstrader.arbitrage_searcher.option_data import OptionData
+from qtrade.optionstrader.arbitrage_searcher.calendar_spread.atm_options_okx import get_okx_atm_options
+from qtrade.optionstrader.arbitrage_searcher.option_data import CalendarSpreadOpportunity
 
 
 def update_calendar_spread_opportunity(opportunity: CalendarSpreadOpportunity,
@@ -50,7 +28,7 @@ def update_calendar_spread_opportunity(opportunity: CalendarSpreadOpportunity,
     """
     try:
         # 导入API函数
-        from qtrade.order_api.deribit_order_placer.options_orderbook import _get, DERIBIT_BASE
+        from qtrade.order_api.deribit.options_orderbook import _get, DERIBIT_BASE
         
         # 获取最新的期权市场数据
         def get_latest_option_data(symbol: str) -> Dict[str, Any]:
@@ -414,7 +392,19 @@ if __name__ == "__main__":
     with open("calendar_spread.yaml", "r", encoding="utf-8") as f:
         config = yaml.safe_load(f)
     # 1. 获取ATM期权（来自atm_options_filter.py）
-    atm_options = get_atm_options(config, "BTC", "testnet")
+    atm_options = get_okx_atm_options(config, "ETH")
+
+    for opt in atm_options:
+        print("================================================")
+        print(f"📌 {opt.symbol}")
+        print(f"   执行价: ${opt.strike:,.2f}")
+        print(f"   报价: Bid ${opt.bid:,.4f} / Ask ${opt.ask:,.4f} / Mid ${opt.mid_price:,.4f}")
+        print(f"   波动率(IV): {opt.iv:.2%}")
+        print(f"   持仓量(OI): {opt.open_interest}")
+        print(f"   希腊字母: Δ {opt.delta:+.4f} | Γ {opt.gamma:+.4f} | ν {opt.vega:+.4f} | Θ {opt.theta:+.4f} | ρ {opt.rho:+.4f}")
+        print(f"   到期: {opt.expiry} | 剩余: {opt.days_to_expiry} 天 | 类型: {opt.option_type}")
+        print("================================================")
+        print("\n")
 
     # 2. 搜索Calendar Spread机会
     opportunities = find_calendar_spread_options(atm_options, config)

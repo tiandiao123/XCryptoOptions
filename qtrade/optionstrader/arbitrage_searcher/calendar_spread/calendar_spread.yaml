@@ -61,7 +61,7 @@ search_config:
   data_source: "deribit"                     # 数据源：okx 或 deribit
   
   # 搜索范围
-  currencies: ["BTC"]                    # 搜索币种
+  currencies: ["ETH"]                    # 搜索币种
   option_types: ["C", "P"]               # 期权类型：C=Call, P=Put
   
   # 结果控制
