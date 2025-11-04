@@ -6,15 +6,9 @@ Gamma Scalping - OKX Selling Straddle Finder
 """
 
 import sys
-import numpy as np
-from datetime import datetime, timezone
 from typing import List, Dict, Any, Optional, Tuple
-from dataclasses import dataclass
 import yaml
 from pathlib import Path
-
-# 添加项目路径
-sys.path.append('/home/ubuntu/options_trading')
 
 from qtrade.optionstrader.arbitrage_searcher.gamma_scalping.straddle_options_okx import (
     get_straddle_atm_options_okx

@@ -13,13 +13,9 @@ from dataclasses import dataclass
 import yaml
 from pathlib import Path
 
-# 添加项目路径
-sys.path.append('/home/ubuntu/options_trading')
+from qtrade.optionstrader.arbitrage_searcher.gamma_scalping.ewma_vol_tracker import RealDataEWMAVolTracker
+from qtrade.optionstrader.arbitrage_searcher.option_data import OptionData
 
-from qtrade.cryptotrader.arbitrage_searcher.gamma_scalping.atm_options_filter import (
-    get_straddle_atm_options, OptionData
-)
-from qtrade.cryptotrader.arbitrage_searcher.gamma_scalping.ewma_vol_tracker import RealDataEWMAVolTracker
 
 
 @dataclass
@@ -170,7 +166,7 @@ def update_straddle_opportunity(opportunity: StraddleOpportunity,
     """
     try:
         # 导入API函数
-        from qtrade.order_api.deribit_order_placer.options_orderbook import _get, DERIBIT_BASE
+        from qtrade.order_api.deribit.options_orderbook import _get, DERIBIT_BASE
         
         # 获取最新的期权市场数据
         def get_latest_option_data(symbol: str) -> Dict[str, Any]:

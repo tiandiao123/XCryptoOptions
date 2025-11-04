@@ -9,7 +9,7 @@ import requests
 from typing import Literal, Dict, Any, List, Optional
 from datetime import datetime
 
-from qtrade.order_api.deribit_order_placer import api_config, real_api_config
+from qtrade.order_api.deribit import DERIBIT_BASE, api_config, real_api_config
 
 
 DERIBIT_BASE = {

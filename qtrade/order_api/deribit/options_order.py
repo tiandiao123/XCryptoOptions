@@ -11,7 +11,7 @@ from datetime import datetime
 import time
 
 # Import API credentials
-from qtrade.order_api.deribit_order_placer import api_config, real_api_config
+from qtrade.order_api.deribit import api_config, real_api_config
 
 DERIBIT_BASE = {
     "testnet": "https://test.deribit.com",

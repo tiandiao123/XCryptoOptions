@@ -5,8 +5,8 @@ Deribit Options Position Information Module - 精确P&L版本
 基于 private/get_account_summary 获取最精确的P&L数据，专为对冲交易设计
 """
 
-from qtrade.order_api.deribit_order_placer.options_order import DERIBIT_BASE, _authenticated_request
-from qtrade.order_api.deribit_order_placer.current_balance import get_account_summary
+from qtrade.order_api.deribit.options_order import DERIBIT_BASE, _authenticated_request
+from qtrade.order_api.deribit.current_balance import get_account_summary
 
 
 
