@@ -2,10 +2,11 @@
 # -*- coding: utf-8 -*-
 """
 Calendar Spread交易执行测试
-演示协同下单策略
+演示协同下单策略 + RiskManager集成
 """
 
 import yaml
+import threading
 from typing import Optional
 
 from qtrade.optionstrader.arbitrage_searcher.calendar_spread.atm_options_okx import get_okx_atm_options
@@ -14,7 +15,8 @@ from qtrade.optionstrader.arbitrage_searcher.calendar_spread.calendar_spread_fin
     find_calendar_spread_options
 )
 from qtrade.optionstrader.arbitrage_searcher.option_data import CalendarSpreadOpportunity
-from qtrade.optionstrader.order_exp.coordinated_order_placer import place_calendar_spread_coordinated
+from qtrade.optionstrader.order_exp.async_coordinated_order_placer import place_calendar_spread_async
+from qtrade.optionstrader.trading_engine.okx_engine.okx_risk_manager import OKXRiskManager
 
 
 def get_calendar_spread_opportunity(
@@ -81,35 +83,71 @@ def get_calendar_spread_opportunity(
 def execute_calendar_spread_trade(
     opportunity: CalendarSpreadOpportunity,
     crypto_notional: float,
+    risk_manager: Optional[OKXRiskManager] = None,
     simulated: bool = True,
-    price_offset: float = 0.0001,
-    poll_interval: float = 0.5
+    price_offset_ticks: int = 1,
+    poll_interval: float = 0.3
 ):
     """
-    执行Calendar Spread协同下单
+    执行Calendar Spread异步协同下单 + RiskManager集成
     
     Args:
         opportunity: Calendar Spread机会
         crypto_notional: 交易数量（币本位）
+        risk_manager: 风险管理器实例（如果提供，成交后自动加入监控）
         simulated: 是否模拟盘
-        price_offset: 价格偏移
+        price_offset_ticks: 价格偏移（tick数量）
         poll_interval: 轮询间隔
     
     Returns:
         执行结果
     """
     print(f"\n{'='*70}")
-    print(f"🚀 执行Calendar Spread协同下单")
+    print(f"🚀 执行Calendar Spread异步协同下单")
     print(f"{'='*70}")
     
-    result = place_calendar_spread_coordinated(
+    # 执行协同下单
+    result = place_calendar_spread_async(
         opportunity=opportunity,
         crypto_notional=crypto_notional,
         simulated=simulated,
-        price_offset=price_offset,
+        price_offset_ticks=price_offset_ticks,
         poll_interval=poll_interval,
-        trigger_ratio=1.0  # 完全成交才触发
+        trigger_fill_ratio=1.0  # 完全成交才触发
     )
+    
+    # 如果成交成功且提供了RiskManager，加入监控
+    if result.get("success") and risk_manager:
+        print(f"\n{'='*70}")
+        print(f"🛡️  将持仓加入RiskManager监控")
+        print(f"{'='*70}")
+        
+        # 设置持仓信息
+        opportunity.open_status = True
+        opportunity.contracts = crypto_notional
+        
+        # 记录开仓IV
+        opportunity.short_option_entry_iv = opportunity.short_option.iv
+        opportunity.long_option_entry_iv = opportunity.long_option.iv
+        
+        # 加入RiskManager
+        add_result = risk_manager.add_position(opportunity)
+        
+        if add_result.get("success"):
+            print(f"✅ 持仓已加入RiskManager")
+            print(f"   Position Key: {add_result['position_key']}")
+            print(f"   当前持仓数: {risk_manager.get_position_count()['calendar_spread']}")
+            print(f"\n📊 风控参数:")
+            print(f"   止损比率: {risk_manager.stop_loss_ratio:.1%}")
+            print(f"   止盈比率: {risk_manager.profit_target_ratio:.1%}")
+            print(f"   Delta对冲: {'启用' if risk_manager.enable_delta_hedge else '禁用'}")
+            
+            # 将result扩展
+            result["risk_manager_added"] = True
+            result["position_key"] = add_result["position_key"]
+        else:
+            print(f"⚠️  加入RiskManager失败: {add_result.get('error')}")
+            result["risk_manager_added"] = False
     
     return result
 
@@ -120,7 +158,7 @@ if __name__ == "__main__":
     
     # Step 1: 获取交易机会
     print("\n" + "="*70)
-    print("📊 Calendar Spread 协同下单测试")
+    print("📊 Calendar Spread 协同下单 + 风控监控测试")
     print("="*70)
     
     opportunity = get_calendar_spread_opportunity(
@@ -133,17 +171,62 @@ if __name__ == "__main__":
         print("\n❌ 未找到交易机会，退出")
         exit(1)
     
-    # Step 2: 确认交易参数
+    # Step 2: 初始化RiskManager
+    print(f"\n{'='*70}")
+    print(f"🛡️  初始化RiskManager")
+    print(f"{'='*70}")
+    
+    env = "mainnet"  # testnet 或 mainnet
+    
+    risk_manager = OKXRiskManager(
+        symbol="ETHUSD",  # ETH期权
+        max_positions=5,
+        enable_delta_hedge=True,
+        delta_hedge_threshold=0.05,
+        stop_loss_ratio=-0.3,      # -30% 止损
+        profit_target_ratio=0.5,   # +50% 止盈
+        price_change_risk_ratio=0.15,
+        env=env
+    )
+    
+    print(f"✅ RiskManager初始化完成")
+    print(f"   Max Positions: {risk_manager.max_positions}")
+    print(f"   Delta Hedge: {risk_manager.enable_delta_hedge}")
+    print(f"   Stop Loss: {risk_manager.stop_loss_ratio:.1%}")
+    print(f"   Profit Target: {risk_manager.profit_target_ratio:.1%}")
+    
+    # Step 3: 启动RiskManager监控线程
+    print(f"\n🔍 启动RiskManager后台监控线程...")
+    
+    def start_risk_monitoring():
+        """后台监控线程"""
+        try:
+            risk_manager.monitor_positions(check_duration="5min")
+        except KeyboardInterrupt:
+            print(f"\n🛑 监控线程收到中断信号")
+        except Exception as e:
+            print(f"\n❌ 监控线程异常: {e}")
+    
+    monitoring_thread = threading.Thread(
+        target=start_risk_monitoring,
+        daemon=True,
+        name="RiskMonitor"
+    )
+    monitoring_thread.start()
+    print(f"✅ 监控线程已启动 (线程ID: {monitoring_thread.ident})")
+    
+    # Step 4: 确认交易参数
     crypto_notional = 0.1  # 0.1 ETH
-    simulated = True       # 模拟盘
+    simulated = (env == "testnet")
     
     print(f"\n📋 交易参数:")
     print(f"   币种: ETH")
     print(f"   数量: {crypto_notional} ETH")
     print(f"   环境: {'🧪 DEMO' if simulated else '🔴 LIVE'}")
-    print(f"   策略: 协同下单（被动挂单+触发跟随）")
+    print(f"   策略: 异步协同下单 + 自动风控")
+    print(f"   Price Offset: 1 tick")
     
-    # Step 3: 执行交易
+    # Step 5: 执行交易
     user_confirm = input(f"\n⚠️  是否继续执行交易? (yes/no): ")
     
     if user_confirm.lower() in ('yes', 'y'):
@@ -151,15 +234,41 @@ if __name__ == "__main__":
             result = execute_calendar_spread_trade(
                 opportunity=opportunity,
                 crypto_notional=crypto_notional,
+                risk_manager=risk_manager,  # 🆕 传入RiskManager
                 simulated=simulated,
-                price_offset=0.0001,
-                poll_interval=0.5
+                price_offset_ticks=1,
+                poll_interval=0.3
             )
             
             if result.get("success"):
-                print(f"\n🎉 交易执行成功！")
+                print(f"\n{'='*70}")
+                print(f"🎉 交易执行成功！")
+                print(f"{'='*70}")
                 print(f"   总耗时: {result['total_time']:.2f}秒")
                 print(f"   触发腿: {result['winner'].upper()}")
+                
+                if result.get("risk_manager_added"):
+                    print(f"\n🛡️  持仓已纳入风控监控")
+                    print(f"   Position Key: {result.get('position_key')}")
+                    print(f"\n📊 RiskManager将自动执行:")
+                    print(f"   ✅ 实时P&L监控")
+                    print(f"   ✅ 止损/止盈检查")
+                    print(f"   ✅ IV反转监控")
+                    print(f"   ✅ Delta对冲（如触发）")
+                    print(f"\n💡 监控线程将持续运行...")
+                    print(f"   按Ctrl+C退出")
+                    
+                    # 保持主线程运行，让监控线程继续工作
+                    try:
+                        import time
+                        while True:
+                            time.sleep(10)
+                            # 定期显示持仓状态
+                            positions = risk_manager.get_position_count()
+                            print(f"\n📊 [{threading.current_thread().name}] 持仓状态: Calendar={positions['calendar_spread']}, Straddle={positions['straddle']}")
+                    except KeyboardInterrupt:
+                        print(f"\n\n🛑 用户中断，退出监控")
+                
             else:
                 print(f"\n❌ 交易执行失败: {result.get('error')}")
                 

@@ -27,45 +27,80 @@ def update_calendar_spread_opportunity(opportunity: CalendarSpreadOpportunity,
         如果net_delta_only=False: CalendarSpreadOpportunity (更新后的完整对象)
     """
     try:
-        # 导入API函数
-        from qtrade.order_api.deribit.options_orderbook import _get, DERIBIT_BASE
+        # 检测symbol格式，判断使用哪个交易所API
+        # OKX格式: ETH-USD-20260130-3400-C (包含"USD")
+        # Deribit格式: ETH-30DEC25-3400-C (不包含"USD")
+        short_symbol = opportunity.short_option.symbol
+        is_okx = "-USD-" in short_symbol
+        
+        if is_okx:
+            # 使用OKX API
+            from qtrade.order_api.okx.func_call.options_market_data import get_okx_option_market_data
+        else:
+            # 使用Deribit API
+            from qtrade.order_api.deribit.options_orderbook import _get, DERIBIT_BASE
         
         # 获取最新的期权市场数据
         def get_latest_option_data(symbol: str) -> Dict[str, Any]:
             """获取单个期权的最新市场数据"""
             try:
-                base = DERIBIT_BASE[env]
-                orderbook = _get(base, "public/get_order_book", {
-                    "instrument_name": symbol,
-                    "depth": 1
-                })
-                
-                # 解析订单簿数据
-                best_bid = orderbook.get("best_bid_price", 0)
-                best_ask = orderbook.get("best_ask_price", 0)
-                mid_price = (best_bid + best_ask) / 2 if best_bid > 0 and best_ask > 0 else 0
-                
-                # 解析希腊字母
-                greeks_data = orderbook.get("greeks", {})
-                raw_delta = greeks_data.get("delta", 0)
-                net_delta_approx = raw_delta - mid_price if mid_price > 0 else raw_delta
-                
-                return {
-                    "best_bid": best_bid,
-                    "best_ask": best_ask,
-                    "mid_price": mid_price,
-                    "mark_price": orderbook.get("mark_price", 0),
-                    "mark_iv": orderbook.get("mark_iv", 0) / 100,  # 转换为小数
-                    "open_interest": orderbook.get("open_interest", 0),
-                    "greeks": {
-                        "delta": raw_delta,
-                        "net_delta": net_delta_approx,
-                        "gamma": greeks_data.get("gamma", 0),
-                        "vega": greeks_data.get("vega", 0),
-                        "theta": greeks_data.get("theta", 0),
-                        "rho": greeks_data.get("rho", 0)
+                if is_okx:
+                    # 使用OKX API
+                    data = get_okx_option_market_data(symbol, simulated=(env == "testnet"))
+                    if not data:
+                        return None
+                    
+                    # OKX数据格式
+                    return {
+                        "best_bid": data["bid"],
+                        "best_ask": data["ask"],
+                        "mid_price": data["mid_price"],
+                        "mark_price": data["mark_price"],
+                        "mark_iv": data["mark_iv"],
+                        "open_interest": data.get("open_interest", 0),
+                        "greeks": {
+                            "delta": data["greeks"]["delta"],
+                            "net_delta": data["greeks"]["delta"],  # OKX的delta就是net_delta
+                            "gamma": data["greeks"]["gamma"],
+                            "vega": data["greeks"]["vega"],
+                            "theta": data["greeks"]["theta"],
+                            "rho": 0  # OKX不提供rho
+                        }
                     }
-                }
+                else:
+                    # 使用Deribit API
+                    base = DERIBIT_BASE[env]
+                    orderbook = _get(base, "public/get_order_book", {
+                        "instrument_name": symbol,
+                        "depth": 1
+                    })
+                    
+                    # 解析订单簿数据
+                    best_bid = orderbook.get("best_bid_price", 0)
+                    best_ask = orderbook.get("best_ask_price", 0)
+                    mid_price = (best_bid + best_ask) / 2 if best_bid > 0 and best_ask > 0 else 0
+                    
+                    # 解析希腊字母
+                    greeks_data = orderbook.get("greeks", {})
+                    raw_delta = greeks_data.get("delta", 0)
+                    net_delta_approx = raw_delta - mid_price if mid_price > 0 else raw_delta
+                    
+                    return {
+                        "best_bid": best_bid,
+                        "best_ask": best_ask,
+                        "mid_price": mid_price,
+                        "mark_price": orderbook.get("mark_price", 0),
+                        "mark_iv": orderbook.get("mark_iv", 0) / 100,  # 转换为小数
+                        "open_interest": orderbook.get("open_interest", 0),
+                        "greeks": {
+                            "delta": raw_delta,
+                            "net_delta": net_delta_approx,
+                            "gamma": greeks_data.get("gamma", 0),
+                            "vega": greeks_data.get("vega", 0),
+                            "theta": greeks_data.get("theta", 0),
+                            "rho": greeks_data.get("rho", 0)
+                        }
+                    }
             except Exception as e:
                 print(f"⚠️ 获取{symbol}最新数据失败: {e}")
                 return None

@@ -251,6 +251,82 @@ class OKXOptionsClient:
         
         return None
     
+    def get_option_summary(self, inst_id: str) -> Optional[Dict[str, Any]]:
+        """
+        Get option summary including Greeks, IV, and other market data
+        Uses /api/v5/public/opt-summary which provides Greeks for options
+        
+        Args:
+            inst_id: Options instrument ID (e.g., "ETH-USD-251114-3400-C")
+        
+        Returns:
+            Option summary data with Greeks
+            Note: Uses deltaPA (Premium Adjusted Delta) for coin-margined options
+        """
+        # Extract underlying from inst_id (e.g., "ETH-USD-251114-3400-C" -> "ETH-USD")
+        parts = inst_id.split("-")
+        if len(parts) < 2:
+            print(f"⚠️ Invalid inst_id format: {inst_id}")
+            return None
+        
+        uly = f"{parts[0]}-{parts[1]}"  # "ETH-USD" or "BTC-USD"
+        
+        # Use opt-summary API for Greeks
+        data = self._request(
+            "GET",
+            "/api/v5/public/opt-summary",
+            params={"uly": uly},
+            signed=False
+        )
+        
+        if data and data.get("data"):
+            # Find the specific instrument in the returned data
+            opt_data = None
+            for item in data["data"]:
+                if item.get("instId") == inst_id:
+                    opt_data = item
+                    break
+            
+            if not opt_data:
+                print(f"⚠️ {inst_id} not found in opt-summary response")
+                return None
+            
+            # OKX provides two types of Greeks:
+            # - delta/gamma/vega/theta: Premium Adjusted Greeks (币本位Delta, for coin-margined options)
+            # - deltaBS/gammaBS/vegaBS/thetaBS: Black-Scholes Greeks (理论Delta)
+            # For OKX coin-margined options, we MUST use "delta" (Premium Adjusted)
+            
+            delta_pa = float(opt_data.get("delta", 0))  # Note: field name is "delta" not "deltaPA"
+            delta_bs = float(opt_data.get("deltaBS", 0))
+            
+            return {
+                "inst_id": inst_id,
+                "mark_price": float(opt_data.get("markPx", 0)),
+                "mark_iv": float(opt_data.get("markVol", 0)),  # Mark IV (in decimal form)
+                # Use Premium Adjusted Greeks for coin-margined options
+                "delta": delta_pa,  # Use "delta" field (Premium Adjusted Delta)
+                "delta_pa": delta_pa,  # Explicitly store PA delta
+                "delta_bs": delta_bs,  # Explicitly store BS delta for reference
+                "gamma": float(opt_data.get("gamma", opt_data.get("gammaBS", 0))),
+                "gamma_pa": float(opt_data.get("gamma", 0)),
+                "gamma_bs": float(opt_data.get("gammaBS", 0)),
+                "vega": float(opt_data.get("vega", opt_data.get("vegaBS", 0))),
+                "vega_pa": float(opt_data.get("vega", 0)),
+                "vega_bs": float(opt_data.get("vegaBS", 0)),
+                "theta": float(opt_data.get("theta", opt_data.get("thetaBS", 0))),
+                "theta_pa": float(opt_data.get("theta", 0)),
+                "theta_bs": float(opt_data.get("thetaBS", 0)),
+                "bid_vol": float(opt_data.get("bidVol", 0)),  # Bid IV
+                "ask_vol": float(opt_data.get("askVol", 0)),  # Ask IV
+                "bid_px": float(opt_data.get("bidPx", 0)),
+                "ask_px": float(opt_data.get("askPx", 0)),
+                "last": float(opt_data.get("last", 0)),
+                "open_interest": int(float(opt_data.get("oi", 0))),
+                "timestamp": opt_data.get("ts")
+            }
+        
+        return None
+    
     # ========== Order Placement ==========
     
     def place_order(
