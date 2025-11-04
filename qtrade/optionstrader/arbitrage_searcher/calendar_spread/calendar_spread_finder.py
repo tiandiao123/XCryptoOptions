@@ -357,6 +357,18 @@ def _sort_and_limit_opportunities(opportunities: List[CalendarSpreadOpportunity]
     return limited_opportunities
 
 
+def _get_currency_from_symbol(symbol: str) -> str:
+    """
+    从期权symbol中提取币种
+    例如: "ETH-USD-251114-3400-C" -> "ETH"
+          "BTC-USD-251114-50000-P" -> "BTC"
+    """
+    parts = symbol.split("-")
+    if len(parts) >= 1:
+        return parts[0]
+    return "UNKNOWN"
+
+
 def display_calendar_opportunities(opportunities: List[CalendarSpreadOpportunity]) -> None:
     """
     显示Calendar Spread机会
@@ -370,6 +382,9 @@ def display_calendar_opportunities(opportunities: List[CalendarSpreadOpportunity
     print("=" * 100)
     
     for opp in opportunities:
+        # 从symbol中提取币种
+        currency = _get_currency_from_symbol(opp.short_option.symbol)
+        
         print(f"\n📊 机会 #{opp.rank} - 信号强度: {opp.signal_strength}")
         
         print(f"\n   📉 短期期权 (卖出):")
@@ -381,8 +396,8 @@ def display_calendar_opportunities(opportunities: List[CalendarSpreadOpportunity
         print(f"\n   💰 分析:")
         print(f"      IV价差: {opp.iv_spread:+.1%} ({opp.iv_spread_pct:+.1%})")
         print(f"      时间间隔: {opp.time_gap_days}天")
-        print(f"      净保险费: {opp.net_premium:+.4f} BTC {'(支出)' if opp.net_premium < 0 else '(收入)'}")
-        print(f"      预期盈利潜力: {opp.max_profit_potential:.4f} BTC")
+        print(f"      净保险费: {opp.net_premium:+.4f} {currency} {'(支出)' if opp.net_premium < 0 else '(收入)'}")
+        print(f"      预期盈利潜力: {opp.max_profit_potential:.4f} {currency}")
         
         print("-" * 100)
 

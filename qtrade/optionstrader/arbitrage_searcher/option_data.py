@@ -179,10 +179,13 @@ class StraddleOpportunityOKX:
     
     def print_summary(self):
         """打印机会摘要"""
+        # 从symbol提取币种
+        currency = self.call_option.symbol.split("-")[0] if hasattr(self.call_option, 'symbol') and "-" in self.call_option.symbol else "UNKNOWN"
+        
         print(f"\n🎯 [OKX] Selling Straddle机会 ({self.signal_strength.upper()})")
         print(f"   执行价: ${self.strike_price:,.0f}")
         print(f"   到期: {self.days_to_expiry}天")
-        print(f"   总权利金: {self.total_premium:.4f} BTC")
+        print(f"   总权利金: {self.total_premium:.4f} {currency}")
         print(f"   IV溢价: {self.iv_premium_pct:+.1f}% (IV={self.avg_iv:.1%}, RV={self.realized_vol:.1%})")
         print(f"   净Delta: {self.net_delta:.3f}")
         print(f"   总Gamma: {self.total_gamma:.3f}")

@@ -257,7 +257,7 @@ if __name__ == "__main__":
     config = load_straddle_config_okx()
     
     # 获取ATM期权
-    straddle_options = get_straddle_atm_options_okx(config, "BTC")
+    straddle_options = get_straddle_atm_options_okx(config, "ETH")
     
     if straddle_options:
         print(f"\n✅ 找到 {len(straddle_options)} 个适合Selling Straddle的ATM期权:")
@@ -299,8 +299,11 @@ if __name__ == "__main__":
             print(f"         价格: Bid={put.bid:.4f}, Ask={put.ask:.4f}, Mid={put.mid_price:.4f}")
             print(f"         希腊字母: Δ={put.delta:+.4f}, Γ={put.gamma:+.4f}, Θ={put.theta:+.4f}")
             
+            # 从symbol提取币种
+            currency = call.symbol.split("-")[0] if "-" in call.symbol else "UNKNOWN"
+            
             print(f"      💰 Straddle总览:")
-            print(f"         总权利金: {total_premium:.4f} BTC")
+            print(f"         总权利金: {total_premium:.4f} {currency}")
             print(f"         平均IV: {avg_iv:.1%}")
             print(f"         净Delta: {call.delta + put.delta:+.4f}")
             print(f"         总Gamma: {call.gamma + put.gamma:+.4f}")
