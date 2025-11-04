@@ -121,7 +121,7 @@ class OKXRiskManager:
                     self.logger.warning(f"⚠️ 持仓已存在: {position_key}")
                     return False 
 
-                self.straddle_positions.put(position_key, position)
+                self.straddle_positions[position_key] = position
                 self.logger.info(f"✅ [OKX] 添加Straddle持仓: {position_key}")
                 return True 
             else:
@@ -135,7 +135,7 @@ class OKXRiskManager:
                     self.logger.warning(f"⚠️ 持仓已存在: {position_key}")
                     return False
 
-                self.calendar_spread_positions.put(position_key, position)
+                self.calendar_spread_positions[position_key] = position
                 self.logger.info(f"✅ [OKX] 添加Calendar Spread持仓: {position_key}")
                 return True
             else:
