@@ -71,6 +71,10 @@ class CalendarSpreadOpportunity:
     # 🆕 开仓时的IV记录
     short_option_entry_iv: float = 0.0
     long_option_entry_iv: float = 0.0
+    
+    # 🆕 开仓时的实际成交价格
+    short_option_entry_price: float = 0.0  # Short腿开仓价格
+    long_option_entry_price: float = 0.0   # Long腿开仓价格
 
     open_status: bool = False  # 是否持仓
     contracts: float = 0.0 # 持仓大小

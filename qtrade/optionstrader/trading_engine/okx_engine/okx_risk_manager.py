@@ -14,7 +14,7 @@ import requests
 from qtrade.optionstrader.arbitrage_searcher.gamma_scalping.ewma_vol_tracker import RealDataEWMAVolTracker
 from qtrade.optionstrader.arbitrage_searcher.calendar_spread.calendar_spread_finder import CalendarSpreadOpportunity, update_calendar_spread_opportunity
 from qtrade.optionstrader.arbitrage_searcher.gamma_scalping.selling_straddle_finder_okx import StraddleOpportunityOKX
-from qtrade.optionstrader.arbitrage_searcher.gamma_scalping.selling_straddle_finder_deribit import update_straddle_opportunity
+from qtrade.optionstrader.arbitrage_searcher.gamma_scalping.selling_straddle_finder_okx import update_straddle_opportunity_okx
 from qtrade.optionstrader.trading_engine.containers.thread_safe_map import ThreadSafeMap
 
 # OKX API clients
@@ -197,6 +197,48 @@ class OKXRiskManager:
             "total": len(self.straddle_positions) + len(self.calendar_spread_positions)
         }
     
+    # ==================== 持仓腿检查方法 ====================
+    
+    def check_position_legs(self, opportunity: Union[StraddleOpportunityOKX, CalendarSpreadOpportunity]) -> Tuple[bool, str]:
+        """
+        检查策略的两腿是否都存在
+        
+        Args:
+            opportunity: 持仓对象
+            
+        Returns:
+            Tuple[bool, str]: (两腿都存在, 错误信息)
+        """
+        try:
+            if isinstance(opportunity, StraddleOpportunityOKX):
+                call_symbol = opportunity.call_option.symbol
+                put_symbol = opportunity.put_option.symbol
+                
+                call_pos = self.options_client.get_position(call_symbol)
+                put_pos = self.options_client.get_position(put_symbol)
+                
+                if not call_pos or float(call_pos.get("pos", 0)) == 0:
+                    return False, f"Call腿丢失或已被平仓: {call_symbol}"
+                if not put_pos or float(put_pos.get("pos", 0)) == 0:
+                    return False, f"Put腿丢失或已被平仓: {put_symbol}"
+                    
+            elif isinstance(opportunity, CalendarSpreadOpportunity):
+                short_symbol = opportunity.short_option.symbol
+                long_symbol = opportunity.long_option.symbol
+                
+                short_pos = self.options_client.get_position(short_symbol)
+                long_pos = self.options_client.get_position(long_symbol)
+                
+                if not short_pos or float(short_pos.get("pos", 0)) == 0:
+                    return False, f"Short腿丢失或已被平仓: {short_symbol}"
+                if not long_pos or float(long_pos.get("pos", 0)) == 0:
+                    return False, f"Long腿丢失或已被平仓: {long_symbol}"
+            
+            return True, ""
+            
+        except Exception as e:
+            return False, f"检查持仓腿失败: {e}"
+    
     # ==================== P&L 查询方法 ====================
     
     def get_opened_opportunities_pnl(self, 
@@ -238,21 +280,85 @@ class OKXRiskManager:
                 self.logger.warning(f"⚠️ [OKX] 无法获取持仓信息")
                 return None, None
             
-            # OKX 直接返回 upl（未实现盈亏）
-            precise_pnl_1 = float(pos_1.get("upl", 0.0))
-            precise_pnl_2 = float(pos_2.get("upl", 0.0))
+            # 获取总持仓数量和当前opportunity的合约数量
+            # 注意单位转换：
+            # - API返回的pos单位是 coins
+            # - opportunity.contracts单位是 币本位（如 ETH）
+            # - 转换关系（ctMult）：
+            #   * ETH: 1 coin = 0.1 ETH
+            #   * BTC: 1 coin = 0.01 BTC
+            
+            # 根据币种确定 CONTRACT_SIZE (ctMult)
+            if target_instruments[0].startswith("BTC"):
+                CONTRACT_SIZE = 0.01  # BTC
+            elif target_instruments[0].startswith("ETH"):
+                CONTRACT_SIZE = 0.1   # ETH
+            else:
+                # 默认使用 ETH 的值，但记录警告
+                CONTRACT_SIZE = 0.1
+                self.logger.warning(f"⚠️ 未知币种，使用默认 CONTRACT_SIZE = 0.1") 
+            
+            total_pos_1 = abs(float(pos_1.get("pos", 0)))  # API返回的总持仓（contracts）
+            total_pos_2 = abs(float(pos_2.get("pos", 0)))
+            opportunity_contracts_crypto = opportunity.contracts  # opportunity存储的合约数（币本位）
+            opportunity_contracts_api = opportunity_contracts_crypto / CONTRACT_SIZE  # 转换为API的合约数（张）
+            
+            # 🔍 调试信息
+            self.logger.info(f"🔍 [调试] P&L计算中间变量:")
+            self.logger.info(f"   total_pos_1 (API返回): {total_pos_1} 张")
+            self.logger.info(f"   total_pos_2 (API返回): {total_pos_2} 张")
+            self.logger.info(f"   opportunity_contracts_crypto: {opportunity_contracts_crypto} 币")
+            self.logger.info(f"   opportunity_contracts_api: {opportunity_contracts_api} 张")
+            
+            # 计算份额比例（使用API单位的合约数）
+            ratio_1 = opportunity_contracts_api / total_pos_1 if total_pos_1 > 0 else 0
+            ratio_2 = opportunity_contracts_api / total_pos_2 if total_pos_2 > 0 else 0
+            
+            self.logger.info(f"   ratio_1: {ratio_1:.4f} ({ratio_1:.2%})")
+            self.logger.info(f"   ratio_2: {ratio_2:.4f} ({ratio_2:.2%})")
+            
+            # OKX 返回的 upl 是该symbol的总未实现盈亏，需要按份额分配
+            total_upl_1 = float(pos_1.get("upl", 0.0))
+            total_upl_2 = float(pos_2.get("upl", 0.0))
+            
+            self.logger.info(f"   total_upl_1 (API返回): {total_upl_1:.8f} ETH")
+            self.logger.info(f"   total_upl_2 (API返回): {total_upl_2:.8f} ETH")
+            
+            # 按份额计算当前opportunity的P&L
+            precise_pnl_1 = total_upl_1 * ratio_1
+            precise_pnl_2 = total_upl_2 * ratio_2
             precise_pnl = precise_pnl_1 + precise_pnl_2
+            
+            self.logger.info(f"   precise_pnl_1 = {total_upl_1:.8f} × {ratio_1:.4f} = {precise_pnl_1:.8f}")
+            self.logger.info(f"   precise_pnl_2 = {total_upl_2:.8f} × {ratio_2:.4f} = {precise_pnl_2:.8f}")
 
-            # 计算 P&L 比率
-            contract_size = opportunity.contracts
-            open_price_1 = float(pos_1.get("avgPx", 0.0))
+            # 计算 P&L 比率（基于当前opportunity的成本，使用API单位）
+            open_price_1 = float(pos_1.get("avgPx", 0.0))  # 单价（ETH/contract）
             open_price_2 = float(pos_2.get("avgPx", 0.0))
-            total_options_cost = open_price_1 * contract_size + open_price_2 * contract_size
-            pnl_ratio = precise_pnl / total_options_cost if total_options_cost > 0 else 0.0
+            
+            self.logger.info(f"   open_price_1 (Short均价): {open_price_1:.8f} ETH/币")
+            self.logger.info(f"   open_price_2 (Long均价): {open_price_2:.8f} ETH/币")
+            
+            # 计算成本基准
+            # 注意：avgPx 的单位是 ETH/币（币本位），不是 ETH/张
+            # 所以要用 opportunity_contracts_crypto（币本位）来计算
+            if strategy_type == "Calendar Spread":
+                # Calendar Spread: 净投入成本 = |Long买入 - Short卖出| × 币本位数量
+                net_cost = abs((open_price_2 + open_price_1) * opportunity_contracts_crypto)
+                self.logger.info(f"   成本计算 (Calendar): |({open_price_2:.8f} + {open_price_1:.8f})| × {opportunity_contracts_crypto} 币 = {net_cost:.8f}")
+            else:
+                # Straddle: 收到的权利金总额（或支付的权利金总额）
+                net_cost = (open_price_1 + open_price_2) * opportunity_contracts_crypto
+                self.logger.info(f"   成本计算 (Straddle): ({open_price_1:.8f} + {open_price_2:.8f}) × {opportunity_contracts_crypto} 币 = {net_cost:.8f}")
+            
+            pnl_ratio = precise_pnl / net_cost if net_cost > 0 else 0.0
+            self.logger.info(f"   P&L比率: {precise_pnl:.8f} / {net_cost:.8f} = {pnl_ratio:+.4f} ({pnl_ratio:+.2%})")
 
             self.logger.info(f"📊 [OKX] {strategy_type} P&L:")
-            self.logger.info(f"   {target_instruments[0]}: {precise_pnl_1:.8f}")
-            self.logger.info(f"   {target_instruments[1]}: {precise_pnl_2:.8f}")
+            self.logger.info(f"   {target_instruments[0]}: {precise_pnl_1:.8f} (总持仓:{total_pos_1}张={total_pos_1*CONTRACT_SIZE}币, 份额:{ratio_1:.2%}, 均价:{open_price_1:.4f})")
+            self.logger.info(f"   {target_instruments[1]}: {precise_pnl_2:.8f} (总持仓:{total_pos_2}张={total_pos_2*CONTRACT_SIZE}币, 份额:{ratio_2:.2%}, 均价:{open_price_2:.4f})")
+            self.logger.info(f"   Opportunity: {opportunity_contracts_crypto}币 = {opportunity_contracts_api}张")
+            self.logger.info(f"   净成本: {net_cost:.8f} ETH")
             self.logger.info(f"   Total: {precise_pnl:.8f} ({pnl_ratio:+.2%})")
             
             return precise_pnl, pnl_ratio
@@ -310,66 +416,148 @@ class OKXRiskManager:
         close_amount = position.contracts 
 
         if isinstance(position, StraddleOpportunityOKX):
-            # 平仓 Call 和 Put
+            # 平仓 Call 和 Put (使用限价单强制成交)
             try:
-                call_result = self.options_client.place_market_order_crypto_notional(
-                    inst_id=position.call_option.symbol,
-                    side="buy",
-                    crypto_notional=close_amount,
-                    reduce_only=True
-                )
+                # 检查哪些腿还存在
+                call_pos = self.options_client.get_position(position.call_option.symbol)
+                put_pos = self.options_client.get_position(position.put_option.symbol)
                 
-                put_result = self.options_client.place_market_order_crypto_notional(
-                    inst_id=position.put_option.symbol,
-                    side="buy",
-                    crypto_notional=close_amount,
-                    reduce_only=True
-                )
+                call_exists = call_pos and float(call_pos.get("pos", 0)) != 0
+                put_exists = put_pos and float(put_pos.get("pos", 0)) != 0
                 
-                call_success = (call_result.get("sCode") == "0")
-                put_success = (put_result.get("sCode") == "0")
+                if not call_exists and not put_exists:
+                    self.logger.warning(f"⚠️ [OKX] Straddle两腿都已不存在，无需平仓")
+                    return {"success": True, "message": "两腿都已平仓"}
                 
-                if not call_success:
-                    raise Exception(f"Call平仓失败: {call_result}")
-                if not put_success:
-                    raise Exception(f"Put平仓失败: {put_result}")
+                # 获取当前市场价格
+                from qtrade.order_api.okx.func_call.options_market_data import get_okx_option_market_data
                 
-                self.logger.info(f"✅ [OKX] Straddle平仓成功")
-                self.logger.info(f"   Call: {position.call_option.symbol} - OrderID: {call_result.get('ordId')}")
-                self.logger.info(f"   Put: {position.put_option.symbol} - OrderID: {put_result.get('ordId')}")
+                call_result = None
+                put_result = None
+                
+                # 平仓存在的Call腿
+                if call_exists:
+                    call_data = get_okx_option_market_data(position.call_option.symbol, simulated=(env == "testnet"))
+                    if call_data:
+                        self.logger.info(f"📊 [OKX] 平仓Straddle Call腿 - 使用限价单")
+                        self.logger.info(f"   Call: ask={call_data['ask']:.6f}")
+                        
+                        call_result = self.options_client.place_limit_order_crypto_notional(
+                            inst_id=position.call_option.symbol,
+                            side="buy",
+                            crypto_notional=close_amount,
+                            px=call_data["ask"],
+                            reduce_only=True
+                        )
+                        
+                        # 检查订单是否成功（使用 success 字段）
+                        if not call_result.get("success"):
+                            raise Exception(f"Call平仓失败: {call_result}")
+                        self.logger.info(f"   ✅ Call: {position.call_option.symbol} - OrderID: {call_result.get('ordId')}")
+                    else:
+                        self.logger.warning(f"⚠️ 无法获取Call价格，跳过")
+                else:
+                    self.logger.info(f"   ⏭️ Call腿已不存在，跳过")
+                
+                # 平仓存在的Put腿
+                if put_exists:
+                    put_data = get_okx_option_market_data(position.put_option.symbol, simulated=(env == "testnet"))
+                    if put_data:
+                        self.logger.info(f"📊 [OKX] 平仓Straddle Put腿 - 使用限价单")
+                        self.logger.info(f"   Put: ask={put_data['ask']:.6f}")
+                        
+                        put_result = self.options_client.place_limit_order_crypto_notional(
+                            inst_id=position.put_option.symbol,
+                            side="buy",
+                            crypto_notional=close_amount,
+                            px=put_data["ask"],
+                            reduce_only=True
+                        )
+                        
+                        # 检查订单是否成功（使用 success 字段）
+                        if not put_result.get("success"):
+                            raise Exception(f"Put平仓失败: {put_result}")
+                        self.logger.info(f"   ✅ Put: {position.put_option.symbol} - OrderID: {put_result.get('ordId')}")
+                    else:
+                        self.logger.warning(f"⚠️ 无法获取Put价格，跳过")
+                else:
+                    self.logger.info(f"   ⏭️ Put腿已不存在，跳过")
+                
+                self.logger.info(f"✅ [OKX] Straddle平仓完成")
                 
             except Exception as e:
                 self.logger.error(f"❌ [OKX] Straddle平仓失败: {e}")
                 return {"success": False, "error": str(e)}
 
         elif isinstance(position, CalendarSpreadOpportunity):
-            # 平仓 Short 和 Long
+            # 平仓 Short 和 Long (使用限价单强制成交)
             try:
-                short_result = self.options_client.place_market_order_crypto_notional(
-                    inst_id=position.short_option.symbol,
-                    side="buy",  # 买回Short
-                    crypto_notional=close_amount,
-                    reduce_only=True
-                )
+                # 检查哪些腿还存在
+                short_pos = self.options_client.get_position(position.short_option.symbol)
+                long_pos = self.options_client.get_position(position.long_option.symbol)
                 
-                long_result = self.options_client.place_market_order_crypto_notional(
-                    inst_id=position.long_option.symbol,
-                    side="sell",  # 卖出Long
-                    crypto_notional=close_amount,
-                    reduce_only=True
-                )
+                short_exists = short_pos and float(short_pos.get("pos", 0)) != 0
+                long_exists = long_pos and float(long_pos.get("pos", 0)) != 0
                 
-                short_success = (short_result.get("sCode") == "0")
-                long_success = (long_result.get("sCode") == "0")
+                if not short_exists and not long_exists:
+                    self.logger.warning(f"⚠️ [OKX] Calendar Spread两腿都已不存在，无需平仓")
+                    return {"success": True, "message": "两腿都已平仓"}
                 
-                if not short_success:
-                    raise Exception(f"Short平仓失败: {short_result}")
-                if not long_success:
-                    raise Exception(f"Long平仓失败: {long_result}")
+                # 获取当前市场价格
+                from qtrade.order_api.okx.func_call.options_market_data import get_okx_option_market_data
                 
-                self.logger.info(f"✅ [OKX] Calendar Spread平仓成功")
-                self.logger.info(f"   Short: {position.short_option.symbol} - OrderID: {short_result.get('ordId')}")
-                self.logger.info(f"   Long: {position.long_option.symbol} - OrderID: {long_result.get('ordId')}")
+                short_result = None
+                long_result = None
+                
+                # 平仓存在的Short腿
+                if short_exists:
+                    short_data = get_okx_option_market_data(position.short_option.symbol, simulated=(env == "testnet"))
+                    if short_data:
+                        self.logger.info(f"📊 [OKX] 平仓Calendar Short腿 - 使用限价单")
+                        self.logger.info(f"   Short: ask={short_data['ask']:.6f}")
+                        
+                        short_result = self.options_client.place_limit_order_crypto_notional(
+                            inst_id=position.short_option.symbol,
+                            side="buy",  # 买回Short
+                            crypto_notional=close_amount,
+                            px=short_data["ask"],
+                            reduce_only=True
+                        )
+                        
+                        # 检查订单是否成功（使用 success 字段）
+                        if not short_result.get("success"):
+                            raise Exception(f"Short平仓失败: {short_result}")
+                        self.logger.info(f"   ✅ Short: {position.short_option.symbol} - OrderID: {short_result.get('ordId')}")
+                    else:
+                        self.logger.warning(f"⚠️ 无法获取Short价格，跳过")
+                else:
+                    self.logger.info(f"   ⏭️ Short腿已不存在，跳过")
+                
+                # 平仓存在的Long腿
+                if long_exists:
+                    long_data = get_okx_option_market_data(position.long_option.symbol, simulated=(env == "testnet"))
+                    if long_data:
+                        self.logger.info(f"📊 [OKX] 平仓Calendar Long腿 - 使用限价单")
+                        self.logger.info(f"   Long: bid={long_data['bid']:.6f}")
+                        
+                        long_result = self.options_client.place_limit_order_crypto_notional(
+                            inst_id=position.long_option.symbol,
+                            side="sell",  # 卖出Long
+                            crypto_notional=close_amount,
+                            px=long_data["bid"],
+                            reduce_only=True
+                        )
+                        
+                        # 检查订单是否成功（使用 success 字段）
+                        if not long_result.get("success"):
+                            raise Exception(f"Long平仓失败: {long_result}")
+                        self.logger.info(f"   ✅ Long: {position.long_option.symbol} - OrderID: {long_result.get('ordId')}")
+                    else:
+                        self.logger.warning(f"⚠️ 无法获取Long价格，跳过")
+                else:
+                    self.logger.info(f"   ⏭️ Long腿已不存在，跳过")
+                
+                self.logger.info(f"✅ [OKX] Calendar Spread平仓完成")
                 
             except Exception as e:
                 self.logger.error(f"❌ [OKX] Calendar Spread平仓失败: {e}")
@@ -401,16 +589,16 @@ class OKXRiskManager:
             
             # 构建记录信息
             record_info = f"""
-=== OKX POSITION CLOSE RECORD ===
-Time: {timestamp}
-Close Reason: {close_reason}
-Position Type: {"Straddle" if isinstance(position, StraddleOpportunityOKX) else "Calendar Spread"}
-Contracts: {position.contracts}
-P&L: {current_pnl:+.6f} ({current_pnl_ratio:+.2%})
-Environment: {env}
-{'='*50}
+            === OKX POSITION CLOSE RECORD ===
+            Time: {timestamp}
+            Close Reason: {close_reason}
+            Position Type: {"Straddle" if isinstance(position, StraddleOpportunityOKX) else "Calendar Spread"}
+            Contracts: {position.contracts}
+            P&L: {current_pnl:+.6f} ({current_pnl_ratio:+.2%})
+            Environment: {env}
+            {'='*50}
 
-"""
+            """
             
             # 写入日志文件
             with open(position_close_log, 'a', encoding='utf-8') as f:
@@ -462,35 +650,43 @@ Environment: {env}
         self.logger.info(f"   订单类型: {order_type.upper()}")
         
         try:
-            # 使用函数式API进行对冲
-            from qtrade.order_api.okx.func_call.perp.perp_order import place_inverse_perp_order_with_btc_notional
+            # 使用新的通用API进行对冲
+            from qtrade.order_api.okx.func_call.perp.perp_order import place_inverse_perp_order_crypto_notional
+            
+            # 确定是否使用模拟盘
+            simulated = (env == "testnet")
+            
+            # 使用 isolated 模式进行对冲
+            self.logger.info(f"   保证金模式: ISOLATED (逐仓)")
             
             if order_type == "market":
-                result = place_inverse_perp_order_with_btc_notional(
-                    inst_id=instrument,
+                order_id, result = place_inverse_perp_order_crypto_notional(
+                    instId=instrument,
                     side=hedge_side,
-                    btc_amount=hedge_amount,
-                    order_type="market"
+                    crypto_notional=hedge_amount,
+                    ordType="market",
+                    tdMode="isolated",  # 🔒 使用逐仓模式
+                    simulated=simulated
                 )
             elif order_type == "limit" and price:
                 self.logger.info(f"   限价价格: ${price:,.2f}")
-                result = place_inverse_perp_order_with_btc_notional(
-                    inst_id=instrument,
+                order_id, result = place_inverse_perp_order_crypto_notional(
+                    instId=instrument,
                     side=hedge_side,
-                    btc_amount=hedge_amount,
-                    order_type="limit",
-                    price=price
+                    crypto_notional=hedge_amount,
+                    ordType="limit",
+                    px=price,
+                    tdMode="isolated",  # 🔒 使用逐仓模式
+                    simulated=simulated
                 )
             else:
                 raise ValueError(f"无效的订单类型: {order_type}")
             
-            if result.get("code") == "0" and result.get("data"):
-                order_data = result["data"][0]
-                if order_data.get("sCode") == "0":
-                    self.logger.info(f"✅ [OKX] 对冲成功 - OrderID: {order_data.get('ordId')}")
-                    return result
-                else:
-                    raise Exception(f"OKX API error: {order_data.get('sMsg')}")
+            # place_inverse_perp_order_crypto_notional 返回 (order_id, result) 元组
+            if order_id:
+                self.logger.info(f"✅ [OKX] 对冲成功 - OrderID: {order_id}")
+                self.logger.info(f"   保证金模式: ISOLATED")
+                return result
             else:
                 raise Exception(f"OKX API error: {result}")
                 
@@ -531,15 +727,34 @@ Environment: {env}
                 self.logger.info(f"   🔄 更新Straddle: {position_key}")
                 
                 try:
+                    # 🔍 检查两腿是否都存在
+                    legs_ok, legs_error = self.check_position_legs(straddle_position)
+                    if not legs_ok:
+                        self.logger.error(f"🚨 [OKX] Straddle持仓腿缺失: {position_key}")
+                        self.logger.error(f"   错误: {legs_error}")
+                        self.logger.warning(f"   ⚠️ 将标记为紧急平仓（另一腿将被平掉）")
+                        positions_to_close.append(("straddle", position_key, straddle_position, f"持仓腿缺失 - {legs_error}"))
+                        continue
+                    
                     # 更新Net Delta（完整模式）
-                    update_straddle_opportunity(
+                    update_straddle_opportunity_okx(
                         opportunity=straddle_position,
                         realized_vol=realized_vol,
-                        net_delta_only=False,
-                        env=env
+                        net_delta_only=False
                     )
 
-                    updated_net_delta = straddle_position.call_option.net_delta + straddle_position.put_option.net_delta
+                    # ⚠️ 重要：需要将单位Delta乘以持仓数量（contracts）
+                    # straddle_position.call_option.net_delta 和 put_option.net_delta 是单位Delta（每合约）
+                    # straddle_position.contracts 是币本位持仓数量（如 0.1 ETH）
+                    contracts = straddle_position.contracts
+                    call_unit_delta = straddle_position.call_option.net_delta
+                    put_unit_delta = straddle_position.put_option.net_delta
+                    
+                    # Combined Net Delta = (Call Unit Delta + Put Unit Delta) × Contracts
+                    updated_net_delta = (call_unit_delta + put_unit_delta) * contracts
+                    
+                    self.logger.info(f"   📊 Delta详情: Call Δ={call_unit_delta:.4f}, Put Δ={put_unit_delta:.4f}, Contracts={contracts:.4f}")
+                    self.logger.info(f"   📊 Combined Net Delta: {updated_net_delta:.6f}")
 
                     # 检查是否超过风险阈值
                     if abs(updated_net_delta) > self.delta_risk_threshold:
@@ -582,6 +797,15 @@ Environment: {env}
                 self.logger.info(f"   🔄 更新Calendar Spread: {position_key}")
                 
                 try:
+                    # 🔍 检查两腿是否都存在
+                    legs_ok, legs_error = self.check_position_legs(calendar_position)
+                    if not legs_ok:
+                        self.logger.error(f"🚨 [OKX] Calendar Spread持仓腿缺失: {position_key}")
+                        self.logger.error(f"   错误: {legs_error}")
+                        self.logger.warning(f"   ⚠️ 将标记为紧急平仓（另一腿将被平掉）")
+                        positions_to_close.append(("calendar", position_key, calendar_position, f"持仓腿缺失 - {legs_error}"))
+                        continue
+                    
                     # 更新Net Delta（完整模式）
                     update_calendar_spread_opportunity(
                         opportunity=calendar_position,
@@ -590,8 +814,19 @@ Environment: {env}
                         env=env
                     )
 
-                    # Calendar Spread Net Delta = Long Delta - Short Delta
-                    updated_net_delta = calendar_position.long_option.net_delta - calendar_position.short_option.net_delta
+                    # ⚠️ 重要：需要将单位Delta乘以持仓数量（contracts）
+                    # calendar_position.short_option.net_delta 和 long_option.net_delta 是单位Delta（每合约）
+                    # calendar_position.contracts 是币本位持仓数量（如 0.1 ETH）
+                    contracts = calendar_position.contracts
+                    short_unit_delta = calendar_position.short_option.net_delta
+                    long_unit_delta = calendar_position.long_option.net_delta
+                    
+                    # Calendar Spread Net Delta = (Long Unit Delta - Short Unit Delta) × Contracts
+                    # 因为我们买入Long（+Delta），卖出Short（-Delta）
+                    updated_net_delta = (long_unit_delta - short_unit_delta) * contracts
+                    
+                    self.logger.info(f"   📊 Delta详情: Short Δ={short_unit_delta:.4f}, Long Δ={long_unit_delta:.4f}, Contracts={contracts:.4f}")
+                    self.logger.info(f"   📊 Combined Net Delta: {updated_net_delta:.6f}")
 
                     # 检查是否超过风险阈值
                     if abs(updated_net_delta) > self.delta_risk_threshold:
@@ -668,7 +903,7 @@ Environment: {env}
         持续监控持仓（自动化交易的核心循环）
         
         Args:
-            check_duration: 检查间隔 ("5min", "10min", "15min", "30min")
+            check_duration: 检查间隔 ("1min", "5min", "10min", "15min", "30min", "1hour")
         """
         # 转换检查间隔为秒数
         check_duration_seconds = self._transform_check_duration(check_duration)
@@ -683,21 +918,152 @@ Environment: {env}
                 # 更新所有持仓
                 total_net_delta = self.update_positions(current_realize_vol, self.env, None)
 
-                # Delta对冲逻辑
-                hedge_delta_diff = -total_net_delta - self.current_hedged_delta
+                print(f"current combined delta: {total_net_delta:.4f}")
 
-                if abs(hedge_delta_diff) > self.delta_hedge_threshold:
-                    self.logger.info(f"📊 [OKX] 执行Delta对冲: {hedge_delta_diff:.4f}")
-                    # 确定合约类型
-                    instrument = "BTC-USD-SWAP" if "BTC" in self.realize_vol_extracter.symbol else "ETH-USD-SWAP"
-                    self.hedge_action(hedge_delta_diff, instrument, "market", None, self.env)
-                    self.current_hedged_delta = -total_net_delta
+                # 🔒 安全检查：如果没有期权持仓，清理所有永续合约仓位
+                total_option_positions = len(self.straddle_positions) + len(self.calendar_positions)
+                if total_option_positions == 0:
+                    self.logger.info("📊 [MainThread] 当前无期权持仓，检查永续合约仓位...")
+                    self._cleanup_orphan_perp_positions()
+                else:
+                    self.logger.info(f"📊 [MainThread] 持仓状态: Calendar={len(self.calendar_positions)}, Straddle={len(self.straddle_positions)}")
+                    
+                    # Delta对冲逻辑（仅在有期权持仓时执行）
+                    hedge_delta_diff = -total_net_delta - self.current_hedged_delta
+
+                    if abs(hedge_delta_diff) > self.delta_hedge_threshold:
+                        self.logger.info(f"📊 [OKX] 执行Delta对冲: {hedge_delta_diff:.4f}")
+                        # 确定合约类型
+                        instrument = "BTC-USD-SWAP" if "BTC" in self.realize_vol_extracter.symbol else "ETH-USD-SWAP"
+                        self.hedge_action(hedge_delta_diff, instrument, "market", None, self.env)
+                        self.current_hedged_delta = -total_net_delta
 
                 time.sleep(check_duration_seconds)
                 
             except Exception as e:
                 self.logger.error(f"❌ [OKX] 监控循环出错: {e}")
                 time.sleep(check_duration_seconds)
+    
+    def _cleanup_orphan_perp_positions(self):
+        """
+        清理孤立的永续合约仓位（当没有期权持仓时）
+        
+        如果系统中没有任何期权持仓（Calendar Spread或Straddle），
+        但存在永续合约对冲仓位，将自动平掉所有永续合约仓位。
+        """
+        try:
+            from qtrade.order_api.okx.func_call.perp.perp_order import get_current_positions
+            
+            # 确定要检查的合约
+            instrument = "BTC-USD-SWAP" if "BTC" in self.realize_vol_extracter.symbol else "ETH-USD-SWAP"
+            
+            # 获取当前永续合约仓位
+            positions = get_current_positions(instType="SWAP", instId=instrument)
+            
+            if not positions:
+                self.logger.info(f"✅ [OKX] 无永续合约仓位，无需清理")
+                # 重置对冲delta记录
+                if self.current_hedged_delta != 0:
+                    self.logger.info(f"🔄 [OKX] 重置对冲Delta记录: {self.current_hedged_delta:.4f} → 0")
+                    self.current_hedged_delta = 0
+                return
+            
+            # 找到实际持仓
+            active_positions = [p for p in positions if float(p.get("pos", 0)) != 0]
+            
+            if not active_positions:
+                self.logger.info(f"✅ [OKX] {instrument} 无持仓，无需清理")
+                if self.current_hedged_delta != 0:
+                    self.logger.info(f"🔄 [OKX] 重置对冲Delta记录: {self.current_hedged_delta:.4f} → 0")
+                    self.current_hedged_delta = 0
+                return
+            
+            # 有持仓需要平掉
+            self.logger.warning(f"⚠️ [OKX] 检测到孤立永续合约仓位！")
+            for pos in active_positions:
+                pos_size = float(pos.get("pos", 0))
+                pos_side = pos.get("posSide", "net")
+                avg_px = float(pos.get("avgPx", 0))
+                upl = float(pos.get("upl", 0))
+                
+                self.logger.warning(f"   合约: {instrument}")
+                self.logger.warning(f"   仓位: {pos_size} 张 ({pos_side})")
+                self.logger.warning(f"   均价: ${avg_px:,.2f}")
+                self.logger.warning(f"   未实现盈亏: {upl:.6f}")
+                
+                # 平仓
+                self.logger.info(f"🔄 [OKX] 开始平仓永续合约...")
+                self._close_perp_position(instrument, pos)
+            
+            # 重置对冲delta记录
+            self.logger.info(f"✅ [OKX] 永续合约仓位已清理完毕")
+            self.current_hedged_delta = 0
+                
+        except Exception as e:
+            self.logger.error(f"❌ [OKX] 清理永续合约仓位失败: {e}")
+    
+    def _close_perp_position(self, instrument: str, position: Dict[str, Any]):
+        """
+        平掉单个永续合约仓位
+        
+        Args:
+            instrument: 合约ID (e.g., "ETH-USD-SWAP")
+            position: 仓位信息字典
+        """
+        try:
+            from qtrade.order_api.okx.func_call.perp.perp_order import place_inverse_perp_order_crypto_notional
+            
+            pos_size = float(position.get("pos", 0))
+            pos_side_raw = position.get("posSide", "net")
+            
+            if pos_size == 0:
+                self.logger.info(f"⏭️ [OKX] {instrument} 仓位为0，跳过")
+                return
+            
+            # 确定平仓方向和数量
+            # pos > 0 表示多头持仓，需要卖出平仓
+            # pos < 0 表示空头持仓，需要买入平仓
+            close_side = "sell" if pos_size > 0 else "buy"
+            
+            # 获取合约信息计算crypto notional
+            from qtrade.order_api.okx.func_call.utils import get_instrument_details, get_current_btc_price
+            
+            ct_val = float(get_instrument_details(instrument)["ctVal"])
+            current_price = get_current_btc_price(instrument)
+            
+            # 计算需要平仓的crypto notional
+            abs_contracts = abs(int(pos_size))
+            usd_notional = abs_contracts * ct_val
+            crypto_notional = usd_notional / current_price
+            
+            self.logger.info(f"📊 [OKX] 平仓参数:")
+            self.logger.info(f"   合约数量: {abs_contracts} 张")
+            self.logger.info(f"   USD名义值: ${usd_notional:.2f}")
+            self.logger.info(f"   Crypto数量: {crypto_notional:.6f}")
+            self.logger.info(f"   平仓方向: {close_side}")
+            
+            # 确定是否使用模拟盘
+            simulated = (self.env == "testnet")
+            
+            # 执行平仓（使用 isolated 模式，与开仓保持一致）
+            order_id, result = place_inverse_perp_order_crypto_notional(
+                instId=instrument,
+                side=close_side,
+                crypto_notional=crypto_notional,
+                ordType="market",
+                tdMode="isolated",
+                simulated=simulated
+            )
+            
+            if order_id:
+                self.logger.info(f"✅ [OKX] 永续合约平仓成功 - OrderID: {order_id}")
+            else:
+                self.logger.error(f"❌ [OKX] 永续合约平仓失败: {result}")
+                
+        except Exception as e:
+            self.logger.error(f"❌ [OKX] 平仓永续合约时出错: {e}")
+            import traceback
+            self.logger.error(traceback.format_exc())
     
     def _transform_check_duration(self, check_duration: str) -> int:
         """
@@ -710,6 +1076,7 @@ Environment: {env}
             int: 秒数
         """
         duration_map = {
+            "1min": 60,
             "5min": 300,
             "10min": 600,
             "15min": 900,
@@ -829,6 +1196,7 @@ Environment: {env}
         Returns:
             tuple: (should_close, reason)
         """
+        
         # 1. 止损/止盈检查
         if current_pnl_ratio <= self.stop_loss_ratio:
             return True, f"止损平仓 (P&L: {current_pnl_ratio:.1%})"
@@ -842,14 +1210,13 @@ Environment: {env}
             long_iv = position.long_option.iv
             current_iv_spread = short_iv - long_iv
             
-            # Calendar Spread依赖短期IV > 长期IV
-            # 如果IV价差消失或反转，应该平仓
-            if current_iv_spread <= 0:
-                return True, f"IV价差反转平仓 (Short IV: {short_iv:.2%}, Long IV: {long_iv:.2%})"
+            # Calendar Spread的核心逻辑：
+            # - 正常情况：Short IV ≈ Long IV 或略高（价差通常 0-5%）
+            # - 只要不显著反转（Short IV < Long IV - 1%），策略就是有效的
+            # - 只有当IV价差显著为负时才需要平仓
             
-            # 如果IV价差缩小到很小，也考虑平仓
-            if current_iv_spread < 0.02:  # IV价差小于2%
-                return True, f"IV价差过小平仓 (价差: {current_iv_spread:.2%})"
+            if current_iv_spread < -0.01:  # IV价差显著为负（< -1%）
+                return True, f"IV价差显著反转平仓 (Short IV: {short_iv:.2%}, Long IV: {long_iv:.2%}, 价差: {current_iv_spread:.2%})"
         
         except Exception as e:
             self.logger.warning(f"⚠️ [OKX] IV价差检查失败: {e}")

@@ -29,9 +29,12 @@ time_pairings:
       
     - short_days: 14                     # 14天短期期权
       long_days: 60                      # 2个月长期期权
+    
+    - short_days: 21                     # 21天短期期权
+      long_days: 60                      # 2个月长期期权
       
-    - short_days: 14                     # 14天短期期权
-      long_days: 90                      # 3个月长期期权
+    # - short_days: 14                     # 14天短期期权
+    #   long_days: 90                      # 3个月长期期权
 
   time_tolerance_days: 10                 # 时间容忍度：±3天
 

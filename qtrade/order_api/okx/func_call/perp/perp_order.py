@@ -6,8 +6,9 @@ from qtrade.order_api.okx.func_call.perp.perp_orderbook import get_bid_ask
 from qtrade.order_api.okx.func_call.utils import get_current_btc_price, get_instrument_details
 
 OKX_BASE_URL = "https://www.okx.com"  # demo vs live decided by header
-SIM_HEADER = {"x-simulated-trading": "1"}  # route to DEMO
 
+# Check environment variable for simulated trading
+USE_SIMULATED = os.getenv("OKX_SIMULATED", "0") == "1"
 
 from qtrade.order_api.okx import API_KEY, API_SECRET, API_PASSPHRASE
 
@@ -20,23 +21,27 @@ def sign(timestamp: str, method: str, path: str, body: str, secret: str) -> str:
     digest = hmac.new(secret.encode(), data.encode(), hashlib.sha256).digest()
     return base64.b64encode(digest).decode()
 
-def auth_headers(ts: str, sig: str) -> Dict[str, str]:
-    return {
+def auth_headers(ts: str, sig: str, simulated: bool = False) -> Dict[str, str]:
+    """Generate authentication headers with optional simulated trading header"""
+    headers = {
         "OK-ACCESS-KEY": API_KEY,
         "OK-ACCESS-SIGN": sig,
         "OK-ACCESS-TIMESTAMP": ts,
         "OK-ACCESS-PASSPHRASE": API_PASSPHRASE,
         "Content-Type": "application/json",
-        **SIM_HEADER,
     }
+    if simulated:
+        headers["x-simulated-trading"] = "1"
+    return headers
 
-def okx_post(path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+def okx_post(path: str, payload: Dict[str, Any], simulated: bool = False) -> Dict[str, Any]:
+    """Make authenticated POST request with optional simulated trading"""
     ts = rfc3339()
     body = json.dumps(payload, separators=(",", ":"))
     sig = sign(ts, "POST", path, body, API_SECRET)
     resp = requests.post(
         OKX_BASE_URL + path,
-        headers=auth_headers(ts, sig),
+        headers=auth_headers(ts, sig, simulated=simulated),
         data=body,
         timeout=15,
     )
@@ -57,6 +62,7 @@ def place_inverse_perp_order(
     posSide: Optional[str] = None,  # if hedge mode, use "long"/"short"
     tdMode: str = "cross",
     clOrdId: Optional[str] = None,
+    simulated: bool = False,  # Use simulated trading
 ):
     payload = {
         "instId": instId,
@@ -71,7 +77,7 @@ def place_inverse_perp_order(
         payload["clOrdId"] = clOrdId
     if posSide:
         payload["posSide"] = posSide  # required when hedge mode is enabled
-    result = okx_post("/api/v5/trade/order", payload)
+    result = okx_post("/api/v5/trade/order", payload, simulated=simulated)
 
     if result.get("code") == "0":
         order_data = result.get("data", [])
@@ -88,28 +94,76 @@ def place_inverse_perp_order(
         return None, result
 
 
-def place_inverse_perp_order_with_btc_notional(
+def place_inverse_perp_order_crypto_notional(
     instId: str,
     side: str,
-    btc_notional: float,
+    crypto_notional: float,
     ordType: str = "market",
     px: Optional[float] = None,
     posSide: Optional[str] = None,
     tdMode: str = "cross",
     clOrdId: Optional[str] = None,
+    simulated: bool = False,
 ):
-
-    current_btc_price = get_current_btc_price("BTC-USD-SWAP")
-    print(f"Current BTC SWAP price: {current_btc_price}")
-
-    total_amount_in_usd = btc_notional * current_btc_price
+    """
+    Place inverse perpetual order with crypto notional (BTC or ETH).
     
-    # get contract value from utils
-    ct_val = get_instrument_details(instId=instId)["ctVal"]
-    print(f"Contract value: {ct_val}")
-    assert int(ct_val) == 100, "Contract value is not 100" 
-    num_of_contracts = int(total_amount_in_usd / int(ct_val))
+    Supports both BTC-USD-SWAP and ETH-USD-SWAP contracts.
+    Automatically detects currency and converts crypto amount to contracts.
+    
+    Args:
+        instId: Contract ID, e.g., "BTC-USD-SWAP" or "ETH-USD-SWAP"
+        side: "buy" or "sell"
+        crypto_notional: Crypto amount (e.g., 0.05 ETH or 0.001 BTC)
+        ordType: "market" or "limit"
+        px: Price (required for limit orders)
+        posSide: Position side for hedge mode ("long"/"short")
+        tdMode: Trade mode ("cross" or "isolated")
+        clOrdId: Client order ID
+        simulated: If True, use simulated trading environment
+        
+    Returns:
+        Tuple[order_id, result]: Order ID and API response
+        
+    Example:
+        # Open 0.05 ETH short position
+        order_id, result = place_inverse_perp_order_crypto_notional(
+            instId="ETH-USD-SWAP",
+            side="sell",
+            crypto_notional=0.05,
+            simulated=True
+        )
+    """
+    # Automatically detect currency from instId
+    if "BTC" in instId:
+        current_price = get_current_btc_price("BTC-USD-SWAP")
+        currency = "BTC"
+    elif "ETH" in instId:
+        current_price = get_current_btc_price("ETH-USD-SWAP")
+        currency = "ETH"
+    else:
+        raise ValueError(f"Unsupported instId: {instId}. Only BTC-USD-SWAP and ETH-USD-SWAP are supported.")
+    
+    if not current_price:
+        raise RuntimeError(f"Failed to get current price for {instId}")
+    
+    env_str = "🟡 DEMO" if simulated else "🔴 LIVE"
+    print(f"[{env_str}] Current {currency} SWAP price: ${current_price:,.2f}")
 
+    # Calculate USD notional value
+    total_amount_in_usd = crypto_notional * current_price
+    
+    # Get contract value from API (BTC=100, ETH=10)
+    ct_val = get_instrument_details(instId=instId)["ctVal"]
+    ct_val_int = int(ct_val)
+    print(f"Contract value: {ct_val_int} USD per contract")
+    
+    # Calculate number of contracts
+    num_of_contracts = int(total_amount_in_usd / ct_val_int)
+    print(f"📊 Conversion: {crypto_notional} {currency} × ${current_price:,.2f} = ${total_amount_in_usd:.2f} → {num_of_contracts} contracts")
+
+    if num_of_contracts == 0:
+        raise ValueError(f"Crypto notional {crypto_notional} {currency} is too small. Need at least ${ct_val_int} USD worth.")
 
     return place_inverse_perp_order(
         instId=instId,
@@ -120,6 +174,37 @@ def place_inverse_perp_order_with_btc_notional(
         posSide=posSide,
         tdMode=tdMode,
         clOrdId=clOrdId,
+        simulated=simulated,
+    )
+
+
+def place_inverse_perp_order_with_btc_notional(
+    instId: str,
+    side: str,
+    btc_notional: float,
+    ordType: str = "market",
+    px: Optional[float] = None,
+    posSide: Optional[str] = None,
+    tdMode: str = "cross",
+    clOrdId: Optional[str] = None,
+    simulated: bool = False,
+):
+    """
+    DEPRECATED: Use place_inverse_perp_order_crypto_notional() instead.
+    
+    This function is kept for backward compatibility.
+    Despite the name 'btc_notional', it works for both BTC and ETH.
+    """
+    return place_inverse_perp_order_crypto_notional(
+        instId=instId,
+        side=side,
+        crypto_notional=btc_notional,
+        ordType=ordType,
+        px=px,
+        posSide=posSide,
+        tdMode=tdMode,
+        clOrdId=clOrdId,
+        simulated=simulated,
     )
 
 def okx_get(path: str, params: Dict[str, Any] = None) -> Dict[str, Any]:
@@ -541,18 +626,24 @@ def place_and_track_order(
 def place_limit_order_relative_to_book(
     instId: str,
     side: str,
-    btc_notional: float,
+    crypto_notional: float,
     offset_usd: float = 0,  # +/- USD from bid/ask
-    posSide: Optional[str] = None
+    posSide: Optional[str] = None,
+    tdMode: str = "cross",
+    simulated: bool = False
 ):
     """
     基于订单簿的bid-1/ask-1价格下限价单
+    
     Args:
-        instId: 合约ID
+        instId: 合约ID (e.g., "BTC-USD-SWAP" or "ETH-USD-SWAP")
         side: "buy" 或 "sell"
-        btc_notional: BTC名义金额
+        crypto_notional: 加密货币数量 (e.g., 0.05 ETH or 0.001 BTC)
         offset_usd: 价格偏移，正数=高于bid/ask，负数=低于bid/ask
         posSide: 持仓方向
+        tdMode: 保证金模式 ("cross" 或 "isolated")
+        simulated: 是否使用模拟盘
+        
     Returns:
         dict: 订单信息，包含orderId
     """
@@ -576,14 +667,16 @@ def place_limit_order_relative_to_book(
         print(f"💰 当前Ask-1: ${book['ask']:,.1f}")
         print(f"🎯 卖单限价: ${limit_price:,.1f} (偏移: ${offset_usd:+.1f})")
     
-    # 下限价单
-    order_id, result = place_inverse_perp_order_with_btc_notional(
+    # 下限价单 - 使用新的通用API
+    order_id, result = place_inverse_perp_order_crypto_notional(
         instId=instId,
         side=side,
-        btc_notional=btc_notional,
+        crypto_notional=crypto_notional,
         ordType="limit",
         px=limit_price,
-        posSide=posSide
+        posSide=posSide,
+        tdMode=tdMode,
+        simulated=simulated
     )
     
     if order_id:
@@ -595,7 +688,7 @@ def place_limit_order_relative_to_book(
             "limit_price": limit_price,
             "reference_price": book["bid"] if side.lower() == "buy" else book["ask"],
             "offset": offset_usd,
-            "btc_notional": btc_notional,
+            "crypto_notional": crypto_notional,
             "result": result
         }
     else:

@@ -8,6 +8,7 @@ Calendar Spread交易执行测试
 import yaml
 import threading
 from typing import Optional
+import time 
 
 from qtrade.optionstrader.arbitrage_searcher.calendar_spread.atm_options_okx import get_okx_atm_options
 from qtrade.optionstrader.arbitrage_searcher.calendar_spread.calendar_spread_finder import (
@@ -131,11 +132,14 @@ def execute_calendar_spread_trade(
         opportunity.long_option_entry_iv = opportunity.long_option.iv
         
         # 加入RiskManager
-        add_result = risk_manager.add_position(opportunity)
+        add_success = risk_manager.add_position(opportunity)
         
-        if add_result.get("success"):
+        if add_success:
+            # 构造position_key用于显示
+            position_key = f"calendar_{opportunity.short_option.symbol}_{opportunity.long_option.symbol}"
+            
             print(f"✅ 持仓已加入RiskManager")
-            print(f"   Position Key: {add_result['position_key']}")
+            print(f"   Position Key: {position_key}")
             print(f"   当前持仓数: {risk_manager.get_position_count()['calendar_spread']}")
             print(f"\n📊 风控参数:")
             print(f"   止损比率: {risk_manager.stop_loss_ratio:.1%}")
@@ -144,9 +148,9 @@ def execute_calendar_spread_trade(
             
             # 将result扩展
             result["risk_manager_added"] = True
-            result["position_key"] = add_result["position_key"]
+            result["position_key"] = position_key
         else:
-            print(f"⚠️  加入RiskManager失败: {add_result.get('error')}")
+            print(f"⚠️  加入RiskManager失败（持仓已满或已存在）")
             result["risk_manager_added"] = False
     
     return result
@@ -161,11 +165,17 @@ if __name__ == "__main__":
     print("📊 Calendar Spread 协同下单 + 风控监控测试")
     print("="*70)
     
-    opportunity = get_calendar_spread_opportunity(
-        config_path=calendar_config_path, 
-        currency="ETH",
-        show_details=False  # 简化输出
-    )
+    while True:
+        opportunity = get_calendar_spread_opportunity(
+            config_path=calendar_config_path, 
+            currency="ETH",
+            show_details=False  # 简化输出
+        )
+        if opportunity:
+            print("找到交易机会，开始执行交易")
+            break
+        print("未找到交易机会，等待30秒后重新获取")
+        time.sleep(30)
     
     if not opportunity:
         print("\n❌ 未找到交易机会，退出")
@@ -201,7 +211,7 @@ if __name__ == "__main__":
     def start_risk_monitoring():
         """后台监控线程"""
         try:
-            risk_manager.monitor_positions(check_duration="5min")
+            risk_manager.monitor_positions(check_duration="1min")
         except KeyboardInterrupt:
             print(f"\n🛑 监控线程收到中断信号")
         except Exception as e:
@@ -216,7 +226,7 @@ if __name__ == "__main__":
     print(f"✅ 监控线程已启动 (线程ID: {monitoring_thread.ident})")
     
     # Step 4: 确认交易参数
-    crypto_notional = 0.1  # 0.1 ETH
+    crypto_notional = 1  # 0.1 ETH
     simulated = (env == "testnet")
     
     print(f"\n📋 交易参数:")
@@ -227,57 +237,51 @@ if __name__ == "__main__":
     print(f"   Price Offset: 1 tick")
     
     # Step 5: 执行交易
-    user_confirm = input(f"\n⚠️  是否继续执行交易? (yes/no): ")
+    time.sleep(10)
     
-    if user_confirm.lower() in ('yes', 'y'):
-        try:
-            result = execute_calendar_spread_trade(
-                opportunity=opportunity,
-                crypto_notional=crypto_notional,
-                risk_manager=risk_manager,  # 🆕 传入RiskManager
-                simulated=simulated,
-                price_offset_ticks=1,
-                poll_interval=0.3
-            )
+    result = execute_calendar_spread_trade(
+        opportunity=opportunity,
+        crypto_notional=crypto_notional,
+        risk_manager=risk_manager,  # 🆕 传入RiskManager
+        simulated=simulated,
+        price_offset_ticks=1,
+        poll_interval=0.3
+    )
+    
+    if result.get("success"):
+        print(f"\n{'='*70}")
+        print(f"🎉 交易执行成功！")
+        print(f"{'='*70}")
+        print(f"   总耗时: {result['total_time']:.2f}秒")
+        print(f"   触发腿: {result['winner'].upper()}")
+        
+        if result.get("risk_manager_added"):
+            print(f"\n🛡️  持仓已纳入风控监控")
+            print(f"   Position Key: {result.get('position_key')}")
+            print(f"\n📊 RiskManager将自动执行:")
+            print(f"   ✅ 实时P&L监控")
+            print(f"   ✅ 止损/止盈检查")
+            print(f"   ✅ IV反转监控")
+            print(f"   ✅ Delta对冲（如触发）")
+            print(f"\n💡 监控线程将持续运行...")
             
-            if result.get("success"):
-                print(f"\n{'='*70}")
-                print(f"🎉 交易执行成功！")
-                print(f"{'='*70}")
-                print(f"   总耗时: {result['total_time']:.2f}秒")
-                print(f"   触发腿: {result['winner'].upper()}")
-                
-                if result.get("risk_manager_added"):
-                    print(f"\n🛡️  持仓已纳入风控监控")
-                    print(f"   Position Key: {result.get('position_key')}")
-                    print(f"\n📊 RiskManager将自动执行:")
-                    print(f"   ✅ 实时P&L监控")
-                    print(f"   ✅ 止损/止盈检查")
-                    print(f"   ✅ IV反转监控")
-                    print(f"   ✅ Delta对冲（如触发）")
-                    print(f"\n💡 监控线程将持续运行...")
-                    print(f"   按Ctrl+C退出")
-                    
-                    # 保持主线程运行，让监控线程继续工作
-                    try:
-                        import time
-                        while True:
-                            time.sleep(10)
-                            # 定期显示持仓状态
-                            positions = risk_manager.get_position_count()
-                            print(f"\n📊 [{threading.current_thread().name}] 持仓状态: Calendar={positions['calendar_spread']}, Straddle={positions['straddle']}")
-                    except KeyboardInterrupt:
-                        print(f"\n\n🛑 用户中断，退出监控")
-                
-            else:
-                print(f"\n❌ 交易执行失败: {result.get('error')}")
-                
-        except KeyboardInterrupt:
-            print(f"\n\n⚠️  用户中断")
-        except Exception as e:
-            print(f"\n❌ 交易异常: {e}")
-            import traceback
-            traceback.print_exc()
+            # 保持主线程运行，让监控线程继续工作
+            try:
+                import time
+                count = 0
+                while True:
+                    count += 1
+                    time.sleep(10)
+                    # 定期显示持仓状态
+                    positions = risk_manager.get_position_count()
+
+                    if count % 100 == 0:
+                        print(f"count: {count}")
+                        print(f"\n📊 [{threading.current_thread().name}] 持仓状态: Calendar={positions['calendar_spread']}, Straddle={positions['straddle']}")
+            except KeyboardInterrupt:
+                print(f"\n\n🛑 用户中断，退出监控")
+        
     else:
-        print("\n❌ 用户取消交易")
+        print(f"\n❌ 交易执行失败: {result.get('error')}")
+
 

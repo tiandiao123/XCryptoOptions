@@ -390,9 +390,7 @@ def load_config_and_find_opportunities_okx(config_path: str = None, currency: st
     if config_path is None:
         # 尝试多个可能的配置路径
         possible_paths = [
-            "/home/ubuntu/options_trading/qtrade/optionstrader/arbitrage_searcher/gamma_scalping/selling_straddle_okx.yaml",
-            "/home/ubuntu/options_trading/qtrade/demo_trade/arbitrage_searcher/gamma_scalping/selling_straddle.yaml",
-            "/home/ubuntu/options_trading/qtrade/optionstrader/arbitrage_searcher/calendar_spread/calendar_spread.yaml"
+            "/home/ubuntu/options_trading/qtrade/optionstrader/arbitrage_searcher/gamma_scalping/selling_straddle.yaml",
         ]
         
         for path in possible_paths:

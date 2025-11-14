@@ -33,74 +33,38 @@ def update_calendar_spread_opportunity(opportunity: CalendarSpreadOpportunity,
         short_symbol = opportunity.short_option.symbol
         is_okx = "-USD-" in short_symbol
         
+        assert is_okx, "Only OKX is supported for Calendar Spread"
         if is_okx:
             # 使用OKX API
             from qtrade.order_api.okx.func_call.options_market_data import get_okx_option_market_data
-        else:
-            # 使用Deribit API
-            from qtrade.order_api.deribit.options_orderbook import _get, DERIBIT_BASE
+
         
         # 获取最新的期权市场数据
         def get_latest_option_data(symbol: str) -> Dict[str, Any]:
             """获取单个期权的最新市场数据"""
             try:
-                if is_okx:
-                    # 使用OKX API
-                    data = get_okx_option_market_data(symbol, simulated=(env == "testnet"))
-                    if not data:
-                        return None
-                    
-                    # OKX数据格式
-                    return {
-                        "best_bid": data["bid"],
-                        "best_ask": data["ask"],
-                        "mid_price": data["mid_price"],
-                        "mark_price": data["mark_price"],
-                        "mark_iv": data["mark_iv"],
-                        "open_interest": data.get("open_interest", 0),
-                        "greeks": {
-                            "delta": data["greeks"]["delta"],
-                            "net_delta": data["greeks"]["delta"],  # OKX的delta就是net_delta
-                            "gamma": data["greeks"]["gamma"],
-                            "vega": data["greeks"]["vega"],
-                            "theta": data["greeks"]["theta"],
-                            "rho": 0  # OKX不提供rho
-                        }
+                # 使用OKX API
+                data = get_okx_option_market_data(symbol, simulated=(env == "testnet"))
+                if not data:
+                    return None
+                
+                # OKX数据格式
+                return {
+                    "best_bid": data["bid"],
+                    "best_ask": data["ask"],
+                    "mid_price": data["mid_price"],
+                    "mark_price": data["mark_price"],
+                    "mark_iv": data["mark_iv"],
+                    "open_interest": data.get("open_interest", 0),
+                    "greeks": {
+                        "delta": data["greeks"]["delta"],
+                        "net_delta": data["greeks"]["delta"],  # OKX的delta就是net_delta
+                        "gamma": data["greeks"]["gamma"],
+                        "vega": data["greeks"]["vega"],
+                        "theta": data["greeks"]["theta"],
+                        "rho": 0  # OKX不提供rho
                     }
-                else:
-                    # 使用Deribit API
-                    base = DERIBIT_BASE[env]
-                    orderbook = _get(base, "public/get_order_book", {
-                        "instrument_name": symbol,
-                        "depth": 1
-                    })
-                    
-                    # 解析订单簿数据
-                    best_bid = orderbook.get("best_bid_price", 0)
-                    best_ask = orderbook.get("best_ask_price", 0)
-                    mid_price = (best_bid + best_ask) / 2 if best_bid > 0 and best_ask > 0 else 0
-                    
-                    # 解析希腊字母
-                    greeks_data = orderbook.get("greeks", {})
-                    raw_delta = greeks_data.get("delta", 0)
-                    net_delta_approx = raw_delta - mid_price if mid_price > 0 else raw_delta
-                    
-                    return {
-                        "best_bid": best_bid,
-                        "best_ask": best_ask,
-                        "mid_price": mid_price,
-                        "mark_price": orderbook.get("mark_price", 0),
-                        "mark_iv": orderbook.get("mark_iv", 0) / 100,  # 转换为小数
-                        "open_interest": orderbook.get("open_interest", 0),
-                        "greeks": {
-                            "delta": raw_delta,
-                            "net_delta": net_delta_approx,
-                            "gamma": greeks_data.get("gamma", 0),
-                            "vega": greeks_data.get("vega", 0),
-                            "theta": greeks_data.get("theta", 0),
-                            "rho": greeks_data.get("rho", 0)
-                        }
-                    }
+                }
             except Exception as e:
                 print(f"⚠️ 获取{symbol}最新数据失败: {e}")
                 return None
@@ -126,7 +90,7 @@ def update_calendar_spread_opportunity(opportunity: CalendarSpreadOpportunity,
             # 因为我们买入长期期权(+Delta)，卖出短期期权(-Delta)
             combined_net_delta = long_net_delta - short_net_delta
             
-            print(f"🔄 更新Calendar Spread Net Delta:")
+            print(f"🔄 更新Calendar Spread Net Delta (单位Delta):")
             print(f"   Short (卖出): {short_net_delta:.4f}")
             print(f"   Long (买入): {long_net_delta:.4f}")
             print(f"   Combined: {combined_net_delta:.4f}")
@@ -140,7 +104,7 @@ def update_calendar_spread_opportunity(opportunity: CalendarSpreadOpportunity,
         opportunity.short_option.ask = short_data["best_ask"]
         opportunity.short_option.mid_price = short_data["mid_price"]
         opportunity.short_option.delta = short_data["greeks"]["delta"]
-        opportunity.short_option.net_delta = short_data["greeks"]["net_delta"]
+        opportunity.short_option.net_delta = short_data["greeks"]["net_delta"]  # 保持交易所原始单位Delta
         opportunity.short_option.gamma = short_data["greeks"]["gamma"]
         opportunity.short_option.vega = short_data["greeks"]["vega"]
         opportunity.short_option.theta = short_data["greeks"]["theta"]
@@ -153,7 +117,7 @@ def update_calendar_spread_opportunity(opportunity: CalendarSpreadOpportunity,
         opportunity.long_option.ask = long_data["best_ask"]
         opportunity.long_option.mid_price = long_data["mid_price"]
         opportunity.long_option.delta = long_data["greeks"]["delta"]
-        opportunity.long_option.net_delta = long_data["greeks"]["net_delta"]
+        opportunity.long_option.net_delta = long_data["greeks"]["net_delta"]  # 保持交易所原始单位Delta
         opportunity.long_option.gamma = long_data["greeks"]["gamma"]
         opportunity.long_option.vega = long_data["greeks"]["vega"]
         opportunity.long_option.theta = long_data["greeks"]["theta"]

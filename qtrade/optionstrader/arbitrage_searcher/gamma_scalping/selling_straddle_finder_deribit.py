@@ -543,7 +543,7 @@ def load_config_and_find_opportunities(config_path: str = None, currency: str = 
         找到的机会列表
     """
     if config_path is None:
-        config_path = "/home/ubuntu/options_trading/qtrade/demo_trade/arbitrage_searcher/gamma_scalping/selling_straddle.yaml"
+        config_path = "/home/ubuntu/options_trading/qtrade/optionstrader/arbitrage_searcher/gamma_scalping/selling_straddle.yaml"
     
     finder = SellingStraddleFinder(config_path, currency, env)
     opportunities = finder.find_selling_straddle_opportunities()

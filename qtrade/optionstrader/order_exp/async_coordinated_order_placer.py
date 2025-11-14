@@ -49,6 +49,7 @@ class OKXAsyncAPI:
     def __init__(self, client: OKXOptionsClient):
         self.client = client
         self.tick_size: Dict[str, float] = {}
+        self._order_cache: Dict[str, ActiveOrder] = {}  # 订单缓存，用于inst_id查找
         self._tick_size_cache: Dict[str, float] = {}
     
     async def get_tick_size(self, symbol: str) -> float:
@@ -100,7 +101,7 @@ class OKXAsyncAPI:
         if not result.get("success"):
             raise RuntimeError(f"Order failed: {result.get('error')}")
         
-        return ActiveOrder(
+        order = ActiveOrder(
             order_id=result["ordId"],
             symbol=symbol,
             side=side,
@@ -108,6 +109,11 @@ class OKXAsyncAPI:
             sz=sz,
             status="live"
         )
+        
+        # 缓存订单信息，用于后续查询
+        self._order_cache[result["ordId"]] = order
+        
+        return order
     
     async def place_aggressive(
         self,
@@ -116,25 +122,76 @@ class OKXAsyncAPI:
         sz: int,
         max_slippage_ticks: int = 2
     ) -> ActiveOrder:
-        """强制成交（市价或接近市价的IOC单）"""
+        """
+        强制成交（使用保守的限价单策略）
+        
+        策略：
+        - 买单：使用 bid+1 (买一价+1tick)，接近但不超过卖盘
+        - 卖单：使用 ask-1 (卖一价-1tick)，接近但不低于买盘
+        
+        优势：
+        1. 比市价单更可控，避免过度滑点
+        2. 比激进策略更保守，成交成本更低
+        3. 成交概率仍然很高
+        """
         loop = asyncio.get_event_loop()
+        
+        # 1. 获取当前盘口
+        orderbook = await loop.run_in_executor(
+            None,
+            self.client.get_orderbook,
+            symbol
+        )
+        
+        if not orderbook:
+            raise RuntimeError(f"Failed to get orderbook for {symbol}")
+        
+        # 2. 获取tick size
+        inst_info = await loop.run_in_executor(
+            None,
+            self.client.get_instrument_info,
+            symbol
+        )
+        
+        tick_sz = float(inst_info.get("tickSz", 0.0001))
+        
+        # 3. 计算激进价格（保守策略）
+        if side == "buy":
+            # 买单：用 bid+1 (买一价+1tick)，在买盘上方但不超过卖盘
+            aggressive_price = orderbook["bid"] + tick_sz
+            price_desc = f"bid+1tick ({orderbook['bid']:.4f} + {tick_sz:.4f})"
+        else:
+            # 卖单：用 ask-1 (卖一价-1tick)，在卖盘下方但不低于买盘
+            aggressive_price = orderbook["ask"] - tick_sz
+            price_desc = f"ask-1tick ({orderbook['ask']:.4f} - {tick_sz:.4f})"
+        
+        print(f"   💥 激进价格: {aggressive_price:.4f} ({price_desc})")
+        
+        # 4. 下限价单（不使用post_only，确保能成交）
         result = await loop.run_in_executor(
             None,
-            self.client.place_market_order,
-            symbol, side, sz, False, None
+            self.client.place_limit_order,
+            symbol, side, sz, aggressive_price,
+            False,  # post_only=False (允许taker)
+            None    # cl_ord_id
         )
         
         if not result.get("success"):
             raise RuntimeError(f"Aggressive order failed: {result.get('error')}")
         
-        return ActiveOrder(
+        order = ActiveOrder(
             order_id=result["ordId"],
             symbol=symbol,
             side=side,
-            price=0.0,
+            price=aggressive_price,
             sz=sz,
-            status="filled"
+            status="live"
         )
+        
+        # 缓存订单信息，用于后续查询
+        self._order_cache[result["ordId"]] = order
+        
+        return order
     
     async def cancel(self, symbol: str, order_id: str) -> None:
         """撤单"""
@@ -145,17 +202,26 @@ class OKXAsyncAPI:
             symbol, order_id, None
         )
     
-    async def get_order(self, order_id: str) -> ActiveOrder:
-        """查询订单状态"""
-        loop = asyncio.get_event_loop()
-        order_info = await loop.run_in_executor(
-            None,
-            self.client.get_order_info,
-            order_id
-        )
+    async def get_order(self, order_id: str, inst_id: Optional[str] = None) -> ActiveOrder:
+        """
+        查询订单状态
         
-        if not order_info:
-            # 如果查询失败，返回未知状态
+        Args:
+            order_id: 订单ID
+            inst_id: 合约ID (如果不提供，从内部缓存查找)
+        """
+        loop = asyncio.get_event_loop()
+        
+        # 如果没有提供inst_id，尝试从已有订单中查找
+        if not inst_id:
+            # 从已下订单中查找inst_id
+            for stored_order in self._order_cache.values():
+                if stored_order.order_id == order_id:
+                    inst_id = stored_order.symbol
+                    break
+        
+        if not inst_id:
+            print(f"   ⚠️ 无法查询订单 {order_id}: inst_id未知")
             return ActiveOrder(
                 order_id=order_id,
                 symbol="",
@@ -165,14 +231,46 @@ class OKXAsyncAPI:
                 status="unknown"
             )
         
+        order_info = await loop.run_in_executor(
+            None,
+            self.client.get_order_details,
+            inst_id,
+            order_id
+        )
+        
+        if not order_info:
+            # 如果查询失败，返回未知状态
+            return ActiveOrder(
+                order_id=order_id,
+                symbol=inst_id,
+                side="buy",
+                price=0.0,
+                sz=0,
+                status="unknown"
+            )
+        
+        # 安全转换：处理空字符串和None
+        def safe_float(value, default=0.0):
+            if not value or value == '':
+                return default
+            return float(value)
+        
+        def safe_int(value, default=0):
+            if not value or value == '':
+                return default
+            try:
+                return int(float(value))
+            except:
+                return default
+        
         return ActiveOrder(
             order_id=order_info["ordId"],
             symbol=order_info["instId"],
             side=order_info["side"],
-            price=float(order_info.get("px", 0)),
-            sz=int(order_info["sz"]),
-            filled_sz=int(float(order_info.get("accFillSz", 0))),
-            avg_px=float(order_info.get("avgPx", 0)),
+            price=safe_float(order_info.get("px")),
+            sz=safe_int(order_info.get("sz")),
+            filled_sz=safe_int(order_info.get("accFillSz")),
+            avg_px=safe_float(order_info.get("avgPx")),
             status=order_info["state"]
         )
 
@@ -323,10 +421,12 @@ class AsyncCalendarSpreadCoordinator:
         """异步等待订单触发"""
         iteration = 0
         
+        print(f"   🔍 [{leg_name}] 监控线程启动，orderId={order_id}")
+        
         while not self._done.is_set():
             iteration += 1
             
-            # 查询订单状态
+            # 查询订单状态（直接抛出异常，不隐藏错误）
             order = await self.api.get_order(order_id)
             self._orders[leg_name] = order
             
@@ -336,10 +436,10 @@ class AsyncCalendarSpreadCoordinator:
             else:
                 fill_ratio = 0.0
             
-            # 显示进度（每10次显示一次）
-            if iteration % 10 == 1:
+            # 显示进度（每3次显示一次，减少刷屏）
+            if iteration % 3 == 1:
                 fill_pct = fill_ratio * 100
-                print(f"   📊 {leg_name.capitalize()}: {fill_pct:.1f}% filled")
+                print(f"   📊 [{leg_name}] {fill_pct:.1f}% filled, status={order.status}")
             
             # 检查是否触发
             if order.status in ("filled", "partially_filled") and fill_ratio >= self.trigger_fill_ratio:
@@ -378,16 +478,21 @@ class AsyncCalendarSpreadCoordinator:
                 timeout=self.cancel_timeout
             )
             cancel_time = time.time() - start_cancel
-            print(f"   ✅ 撤单完成 (耗时: {cancel_time:.2f}秒)")
+            print(f"   ✅ 撤单请求已发送 (耗时: {cancel_time:.2f}秒)")
         except asyncio.TimeoutError:
             print(f"   ⚠️ 撤单超时，继续处理...")
         except Exception as e:
             print(f"   ⚠️ 撤单异常: {e}")
         
-        # 2. 查询最新状态
-        await asyncio.sleep(0.2)
+        # 2. 等待撤单生效（增加等待时间以确保交易所处理完成）
+        print(f"   ⏳ 等待撤单生效...")
+        await asyncio.sleep(0.5)  # 从0.2秒增加到0.5秒
+        
+        # 3. 查询最新状态
         loser_order = await self.api.get_order(loser_order.order_id)
         self._orders[loser] = loser_order
+        
+        print(f"   📊 当前状态: {loser_order.status}, 已成交: {loser_order.filled_sz}/{loser_order.sz}")
         
         remain_sz = loser_order.sz - loser_order.filled_sz
         
@@ -395,21 +500,118 @@ class AsyncCalendarSpreadCoordinator:
             print(f"   ℹ️ {loser_label}腿已完全成交，无需市价单")
             return {"success": True, "aggress": False}
         
-        # 3. 市价成交
-        print(f"\n💥 市价成交剩余 {remain_sz} contracts")
+        # 3. 激进成交剩余数量
+        print(f"\n💥 激进成交剩余 {remain_sz} contracts")
         
-        try:
-            await self.api.place_aggressive(
-                loser_order.symbol,
-                loser_order.side,
-                remain_sz,
-                self.max_slippage_ticks
+        aggress_order = await self.api.place_aggressive(
+            loser_order.symbol,
+            loser_order.side,
+            remain_sz,
+            self.max_slippage_ticks
+        )
+        print(f"   ✅ 激进单已下达 (ordId: {aggress_order.order_id})")
+        
+        # 等待成交（最多等待3秒）
+        print(f"   🔍 等待成交确认...")
+        max_wait = 3.0
+        check_interval = 0.3
+        elapsed = 0.0
+        
+        while elapsed < max_wait:
+            await asyncio.sleep(check_interval)
+            elapsed += check_interval
+            
+            # 查询订单状态
+            aggress_status = await self.api.get_order(aggress_order.order_id)
+            
+            if aggress_status.status == "filled":
+                print(f"   ✅ 完全成交！({aggress_status.filled_sz}/{aggress_status.sz})")
+                return {
+                    "success": True, 
+                    "aggress": True, 
+                    "aggress_sz": remain_sz,
+                    "filled_sz": aggress_status.filled_sz
+                }
+            elif aggress_status.status == "partially_filled":
+                print(f"   ⏳ 部分成交 ({aggress_status.filled_sz}/{aggress_status.sz})")
+                continue
+            elif aggress_status.status in ("canceled", "rejected"):
+                print(f"   ⚠️ 激进单异常: {aggress_status.status}")
+                break
+        
+        # 超时或异常，查询最终状态
+        final_status = await self.api.get_order(aggress_order.order_id)
+        if final_status.filled_sz > 0:
+            print(f"   ⚠️ 部分成交 ({final_status.filled_sz}/{final_status.sz})")
+            return {
+                "success": True, 
+                "aggress": True, 
+                "aggress_sz": remain_sz,
+                "filled_sz": final_status.filled_sz,
+                "partial": True
+            }
+        else:
+            print(f"   ⚠️ 激进单未成交，使用对手盘价格强制成交")
+            
+            # 撤销未成交的激进单
+            await self.api.cancel(loser_order.symbol, aggress_order.order_id)
+            await asyncio.sleep(0.3)
+            
+            # 使用对手盘价格挂限价单强制成交
+            loop = asyncio.get_event_loop()
+            
+            # 获取最新盘口
+            orderbook = await loop.run_in_executor(
+                None,
+                self.api.client.get_orderbook,
+                loser_order.symbol
             )
-            print(f"   ✅ 市价单已执行")
-            return {"success": True, "aggress": True, "aggress_sz": remain_sz}
-        except Exception as e:
-            print(f"   ❌ 市价单失败: {e}")
-            return {"success": False, "error": str(e)}
+            
+            if not orderbook:
+                print(f"   ❌ 无法获取盘口，强制成交失败")
+                return {"success": False, "error": "Failed to get orderbook"}
+            
+            # 根据方向选择对手盘价格
+            if loser_order.side == "buy":
+                # 买单：直接用ask价（卖一价）吃掉对手盘
+                force_price = orderbook["ask"]
+                price_desc = f"ask ({force_price:.4f})"
+            else:
+                # 卖单：直接用bid价（买一价）吃掉对手盘
+                force_price = orderbook["bid"]
+                price_desc = f"bid ({force_price:.4f})"
+            
+            print(f"   💥 强制成交价格: {force_price:.4f} ({price_desc})")
+            
+            force_result = await loop.run_in_executor(
+                None,
+                self.api.client.place_limit_order,
+                loser_order.symbol, loser_order.side, remain_sz, force_price,
+                False,  # post_only=False
+                None    # cl_ord_id
+            )
+            
+            if force_result.get("success"):
+                print(f"   ✅ 强制成交单已执行 (ordId: {force_result['ordId']})")
+                
+                # 等待1秒确认成交
+                await asyncio.sleep(1.0)
+                force_order_id = force_result["ordId"]
+                final_check = await self.api.get_order(force_order_id)
+                
+                print(f"   📊 最终状态: {final_check.status}, 已成交: {final_check.filled_sz}/{final_check.sz}")
+                
+                return {
+                    "success": True,
+                    "aggress": True,
+                    "aggress_sz": remain_sz,
+                    "filled_sz": final_check.filled_sz,
+                    "force_order": True,
+                    "force_price": force_price
+                }
+            else:
+                print(f"   ❌ 强制成交失败: {force_result.get('error')}")
+                return {"success": False, "error": "Force order failed"}
     
     async def execute(self) -> Dict[str, Any]:
         """执行完整的异步协同下单流程"""
