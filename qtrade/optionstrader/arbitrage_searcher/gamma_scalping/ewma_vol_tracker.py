@@ -85,8 +85,9 @@ class RealDataEWMAVolTracker:
         self.last_update_time = None
         self.is_initialized = False
         
-        # CSV缓存设置
-        self.cache_dir = Path("/home/ubuntu/options_trading/qtrade/demo_trade/arbitrage_searcher/gamma_scalping/cache")
+        # CSV缓存设置 - 使用当前文件所在目录下的cache文件夹
+        current_file_dir = Path(__file__).parent
+        self.cache_dir = current_file_dir / "cache"
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         self.csv_file = self.cache_dir / f"{symbol}_{interval}_klines.csv"
         

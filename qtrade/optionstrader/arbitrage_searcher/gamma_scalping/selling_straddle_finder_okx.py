@@ -414,7 +414,7 @@ if __name__ == "__main__":
     
     # 寻找机会
     opportunities = load_config_and_find_opportunities_okx(
-        currency="BTC",
+        currency="ETH",
         detailed=True
     )
     

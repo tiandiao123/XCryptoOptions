@@ -38,7 +38,8 @@ class OKXRiskManager:
                  max_positions: int = 1, 
                  enable_delta_hedge: bool = False, 
                  delta_hedge_threshold: float = 0.05,
-                 delta_risk_threshold: float = 0.5, 
+                 delta_risk_threshold: float = 0.5,
+                 hedge_freq: int = 5,
                  stop_loss_ratio: float = -0.3, 
                  profit_target_ratio: float = 0.5, 
                  price_change_risk_ratio: float = 0.15, 
@@ -53,6 +54,7 @@ class OKXRiskManager:
             enable_delta_hedge: 是否启用Delta对冲
             delta_hedge_threshold: Delta对冲阈值
             delta_risk_threshold: Delta风险阈值
+            hedge_freq: 对冲频率（监控周期的倍数，例如5表示每5个监控周期执行一次对冲检查）
             stop_loss_ratio: 止损百分比
             profit_target_ratio: 止盈百分比
             price_change_risk_ratio: 价格变化风险阈值
@@ -64,6 +66,8 @@ class OKXRiskManager:
         self.enable_delta_hedge = enable_delta_hedge
         self.delta_risk_threshold = delta_risk_threshold
         self.delta_hedge_threshold = delta_hedge_threshold
+        self.hedge_freq = hedge_freq
+        self.hedge_counter = 0  # 对冲计数器
         self.current_hedged_delta = 0.0
         self.stop_loss_ratio = stop_loss_ratio
         self.profit_target_ratio = profit_target_ratio
@@ -84,6 +88,11 @@ class OKXRiskManager:
         self.straddle_positions = ThreadSafeMap()
         self.calendar_spread_positions = ThreadSafeMap()
 
+        # 🆕 永续合约 Realized P&L 跟踪
+        self.perp_pnl_dict = {}  # {tradeId: fill_data}
+        self.total_perp_realized_pnl = 0.0  # 累积的已实现P&L
+        self.last_perp_fill_time = None  # 最后一次成交时间（毫秒时间戳）
+        
         # 🆕 初始化 OKX 客户端
         simulated = (env == "testnet")
         self.options_client = OKXOptionsClient(simulated=simulated)
@@ -93,6 +102,8 @@ class OKXRiskManager:
         self.logger.info(f"   环境: {'模拟盘' if simulated else '实盘'}")
         self.logger.info(f"   最大持仓: {max_positions}")
         self.logger.info(f"   Delta对冲: {'启用' if enable_delta_hedge else '禁用'}")
+        if enable_delta_hedge:
+            self.logger.info(f"   对冲频率: 每 {hedge_freq} 个监控周期")
 
         # 初始化波动率跟踪器
         if "BTC" in symbol:
@@ -354,12 +365,29 @@ class OKXRiskManager:
             pnl_ratio = precise_pnl / net_cost if net_cost > 0 else 0.0
             self.logger.info(f"   P&L比率: {precise_pnl:.8f} / {net_cost:.8f} = {pnl_ratio:+.4f} ({pnl_ratio:+.2%})")
 
+            # 获取Delta信息
+            if isinstance(opportunity, StraddleOpportunityOKX):
+                delta_1 = opportunity.call_option.net_delta  # Call Delta
+                delta_2 = opportunity.put_option.net_delta   # Put Delta
+                delta_label_1 = "Call Δ"
+                delta_label_2 = "Put Δ"
+            elif isinstance(opportunity, CalendarSpreadOpportunity):
+                delta_1 = opportunity.short_option.net_delta  # Short Delta
+                delta_2 = opportunity.long_option.net_delta   # Long Delta
+                delta_label_1 = "Short Δ"
+                delta_label_2 = "Long Δ"
+            else:
+                delta_1 = 0.0
+                delta_2 = 0.0
+                delta_label_1 = "Δ"
+                delta_label_2 = "Δ"
+            
             self.logger.info(f"📊 [OKX] {strategy_type} P&L:")
-            self.logger.info(f"   {target_instruments[0]}: {precise_pnl_1:.8f} (总持仓:{total_pos_1}张={total_pos_1*CONTRACT_SIZE}币, 份额:{ratio_1:.2%}, 均价:{open_price_1:.4f})")
-            self.logger.info(f"   {target_instruments[1]}: {precise_pnl_2:.8f} (总持仓:{total_pos_2}张={total_pos_2*CONTRACT_SIZE}币, 份额:{ratio_2:.2%}, 均价:{open_price_2:.4f})")
+            self.logger.info(f"   {target_instruments[0]}: {precise_pnl_1:+.8f} | {delta_label_1}={delta_1:+.4f} | 总持仓:{total_pos_1}张={total_pos_1*CONTRACT_SIZE}币 | 份额:{ratio_1:.2%} | 均价:{open_price_1:.4f}")
+            self.logger.info(f"   {target_instruments[1]}: {precise_pnl_2:+.8f} | {delta_label_2}={delta_2:+.4f} | 总持仓:{total_pos_2}张={total_pos_2*CONTRACT_SIZE}币 | 份额:{ratio_2:.2%} | 均价:{open_price_2:.4f}")
             self.logger.info(f"   Opportunity: {opportunity_contracts_crypto}币 = {opportunity_contracts_api}张")
             self.logger.info(f"   净成本: {net_cost:.8f} ETH")
-            self.logger.info(f"   Total: {precise_pnl:.8f} ({pnl_ratio:+.2%})")
+            self.logger.info(f"   Total P&L: {precise_pnl:+.8f} ({pnl_ratio:+.2%})")
             
             return precise_pnl, pnl_ratio
             
@@ -918,25 +946,122 @@ class OKXRiskManager:
                 # 更新所有持仓
                 total_net_delta = self.update_positions(current_realize_vol, self.env, None)
 
-                print(f"current combined delta: {total_net_delta:.4f}")
+                # 📊 获取永续合约持仓信息
+                from qtrade.order_api.okx.func_call.perp.perp_order import get_current_positions
+                instrument = "BTC-USD-SWAP" if "BTC" in self.realize_vol_extracter.symbol else "ETH-USD-SWAP"
+                perp_positions = get_current_positions(instType="SWAP", instId=instrument, silent=True)
+                
+                # 计算永续合约P&L和持仓
+                perp_delta = 0.0
+                perp_unrealized_pnl = 0.0  # 未实现P&L
+                if perp_positions:
+                    for pos in perp_positions:
+                        pos_size = float(pos.get("pos", 0))
+                        if pos_size != 0:
+                            upl = float(pos.get("upl", 0))
+                            perp_unrealized_pnl += upl
+                            # 对于反向合约，pos就是合约数量（张），需要转换为币本位Delta
+                            # 反向合约: 1张 ≈ ctVal USD / 当前价格 币
+                            ct_val = float(pos.get("ctVal", 0))
+                            mark_px = float(pos.get("markPx", 0))
+                            if mark_px > 0:
+                                # Delta = pos (张) × ctVal (USD/张) / markPx (USD/币) = 币数量
+                                perp_delta += (pos_size * ct_val / mark_px)
+                
+                # 📈 更新永续合约已实现P&L（从交易历史中获取）
+                if self.enable_delta_hedge:
+                    try:
+                        from qtrade.optionstrader.trading_engine.okx_engine.perp_pnl_tracker import get_perp_realized_pnl
+                        from datetime import datetime, timedelta
+                        
+                        # 确定查询起始时间
+                        if self.last_perp_fill_time is None:
+                            # 首次查询：从24小时前开始
+                            start_time = (datetime.now() - timedelta(hours=24)).strftime("%Y-%m-%d %H:%M:%S")
+                        else:
+                            # 后续查询：使用上次的结束时间（函数内部会自动往前推5分钟）
+                            start_time = str(self.last_perp_fill_time)
+                        
+                        # 调用增量更新函数
+                        self.total_perp_realized_pnl, self.last_perp_fill_time = get_perp_realized_pnl(
+                            instrument=instrument,
+                            start_time=start_time,
+                            perp_pnl_dict=self.perp_pnl_dict,
+                            previous_realized_pnl=self.total_perp_realized_pnl,
+                            silent=True  # 在监控循环中静默模式
+                        )
+                        self.logger.debug(f"✅ [OKX] 永续合约已实现P&L已更新: {self.total_perp_realized_pnl:+.8f} {self.realize_vol_extracter.symbol[:3]}")
+                    except Exception as e:
+                        self.logger.warning(f"⚠️ [OKX] 更新永续合约已实现P&L失败: {e}")
+                
+                # 永续合约总P&L = 未实现P&L + 已实现P&L
+                perp_total_pnl = perp_unrealized_pnl + self.total_perp_realized_pnl
+                
+                # 计算期权总P&L
+                options_pnl = 0.0
+                for pos_key, position in list(self.straddle_positions.items()) + list(self.calendar_spread_positions.items()):
+                    try:
+                        pnl, _ = self.get_opened_opportunities_pnl(position, self.env)
+                        if pnl is not None:
+                            options_pnl += pnl
+                    except:
+                        pass
+                
+                # 总P&L = 期权P&L + 永续合约总P&L
+                total_pnl = options_pnl + perp_total_pnl
+                
+                # 打印综合信息
+                currency = self.realize_vol_extracter.symbol[:3]
+                print(f"\n{'='*70}")
+                print(f"📊 持仓状态汇总")
+                print(f"{'='*70}")
+                print(f"🎯 期权持仓:")
+                print(f"   Combined Delta: {total_net_delta:+.6f} {currency}")
+                print(f"   期权P&L (未实现): {options_pnl:+.8f} {currency}")
+                print(f"\n🔒 永续合约对冲:")
+                print(f"   已对冲Delta: {self.current_hedged_delta:+.6f} {currency}")
+                print(f"   实际持仓Delta: {perp_delta:+.6f} {currency}")
+                print(f"   未实现P&L: {perp_unrealized_pnl:+.8f} {currency}")
+                print(f"   已实现P&L: {self.total_perp_realized_pnl:+.8f} {currency} (累计{len(self.perp_pnl_dict)}笔成交)")
+                print(f"   永续合约Total: {perp_total_pnl:+.8f} {currency}")
+                print(f"\n💰 总P&L (期权+永续): {total_pnl:+.8f} {currency}")
+                print(f"{'='*70}\n")
 
-                # 🔒 安全检查：如果没有期权持仓，清理所有永续合约仓位
-                total_option_positions = len(self.straddle_positions) + len(self.calendar_positions)
+                # 🔒 安全检查：如果没有期权持仓且启用了对冲，清理所有永续合约仓位
+                total_option_positions = len(self.straddle_positions) + len(self.calendar_spread_positions)
                 if total_option_positions == 0:
-                    self.logger.info("📊 [MainThread] 当前无期权持仓，检查永续合约仓位...")
-                    self._cleanup_orphan_perp_positions()
+                    if self.enable_delta_hedge:
+                        self.logger.info("📊 [MainThread] 当前无期权持仓，检查永续合约仓位...")
+                        self._cleanup_orphan_perp_positions()
+                    else:
+                        self.logger.debug("⏭️ [MainThread] 当前无期权持仓且未启用对冲，跳过永续合约检查")
                 else:
-                    self.logger.info(f"📊 [MainThread] 持仓状态: Calendar={len(self.calendar_positions)}, Straddle={len(self.straddle_positions)}")
+                    self.logger.info(f"📊 [MainThread] 持仓状态: Calendar={len(self.calendar_spread_positions)}, Straddle={len(self.straddle_positions)}")
                     
-                    # Delta对冲逻辑（仅在有期权持仓时执行）
-                    hedge_delta_diff = -total_net_delta - self.current_hedged_delta
+                    # Delta对冲逻辑（仅在启用对冲且有期权持仓时执行）
+                    if self.enable_delta_hedge:
+                        # 增加计数器
+                        self.hedge_counter += 1
+                        
+                        # 检查是否到达对冲频率
+                        if self.hedge_counter >= self.hedge_freq:
+                            # 重置计数器
+                            self.hedge_counter = 0
+                            
+                            hedge_delta_diff = -total_net_delta - self.current_hedged_delta
 
-                    if abs(hedge_delta_diff) > self.delta_hedge_threshold:
-                        self.logger.info(f"📊 [OKX] 执行Delta对冲: {hedge_delta_diff:.4f}")
-                        # 确定合约类型
-                        instrument = "BTC-USD-SWAP" if "BTC" in self.realize_vol_extracter.symbol else "ETH-USD-SWAP"
-                        self.hedge_action(hedge_delta_diff, instrument, "market", None, self.env)
-                        self.current_hedged_delta = -total_net_delta
+                            if abs(hedge_delta_diff) > self.delta_hedge_threshold:
+                                self.logger.info(f"📊 [OKX] 执行Delta对冲: {hedge_delta_diff:.4f}")
+                                # 确定合约类型
+                                instrument = "BTC-USD-SWAP" if "BTC" in self.realize_vol_extracter.symbol else "ETH-USD-SWAP"
+                                self.hedge_action(hedge_delta_diff, instrument, "market", None, self.env)
+                                self.current_hedged_delta = -total_net_delta
+                            else:
+                                self.logger.debug(f"✅ [OKX] Delta在安全范围内 (Δ差异={hedge_delta_diff:.4f} < 阈值={self.delta_hedge_threshold})")
+                        else:
+                            self.logger.debug(f"⏭️ [OKX] 对冲计数器: {self.hedge_counter}/{self.hedge_freq} (下次对冲周期还需 {self.hedge_freq - self.hedge_counter} 个监控周期)")
+                    else:
+                        self.logger.debug(f"⏭️ [OKX] Delta对冲已禁用 (当前Net Delta={total_net_delta:.4f})")
 
                 time.sleep(check_duration_seconds)
                 

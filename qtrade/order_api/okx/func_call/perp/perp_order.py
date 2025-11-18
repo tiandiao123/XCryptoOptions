@@ -51,6 +51,40 @@ def okx_post(path: str, payload: Dict[str, Any], simulated: bool = False) -> Dic
         raise RuntimeError(f"OKX error {data.get('code')}: {data.get('msg')} | data={data}")
     return data
 
+def okx_get(path: str, params: Optional[Dict[str, Any]] = None, simulated: bool = False) -> Dict[str, Any]:
+    """Make authenticated GET request with optional simulated trading
+    
+    Args:
+        path: API路径，如 "/api/v5/trade/fills-history"
+        params: 查询参数字典
+        simulated: 是否使用模拟盘
+    
+    Returns:
+        dict: API响应数据
+    """
+    ts = rfc3339()
+    query_string = ""
+    if params:
+        # 构建查询字符串
+        query_parts = [f"{k}={v}" for k, v in params.items() if v is not None]
+        if query_parts:
+            query_string = "?" + "&".join(query_parts)
+    
+    # 签名时需要包含查询字符串
+    full_path = path + query_string
+    sig = sign(ts, "GET", full_path, "", API_SECRET)
+    
+    resp = requests.get(
+        OKX_BASE_URL + full_path,
+        headers=auth_headers(ts, sig, simulated),
+        timeout=15,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    if data.get("code") not in ("0", 0, None):
+        raise RuntimeError(f"OKX error {data.get('code')}: {data.get('msg')} | data={data}")
+    return data
+
 
 
 def place_inverse_perp_order(
@@ -207,41 +241,16 @@ def place_inverse_perp_order_with_btc_notional(
         simulated=simulated,
     )
 
-def okx_get(path: str, params: Dict[str, Any] = None) -> Dict[str, Any]:
-    """GET request with authentication"""
-    ts = rfc3339()
-    query_string = ""
-    if params:
-        query_string = "&".join([f"{k}={v}" for k, v in params.items()])
-        path_with_query = f"{path}?{query_string}"
-    else:
-        path_with_query = path
-    
-    sig = sign(ts, "GET", path_with_query, "", API_SECRET)
-    
-    url = OKX_BASE_URL + path
-    if query_string:
-        url += f"?{query_string}"
-    
-    resp = requests.get(
-        url,
-        headers=auth_headers(ts, sig),
-        timeout=15,
-    )
-    resp.raise_for_status()
-    data = resp.json()
-    if data.get("code") not in ("0", 0, None):
-        raise RuntimeError(f"OKX error {data.get('code')}: {data.get('msg')} | data={data}")
-    return data
-
-def get_current_positions(instType: str = "SWAP", instId: Optional[str] = None):
+def get_current_positions(instType: str = "SWAP", instId: Optional[str] = None, silent: bool = False):
     """
     获取当前仓位信息
     Args:
         instType: 产品类型，默认为"SWAP"
         instId: 特定合约ID，如"BTC-USD-SWAP"，为None时获取所有仓位
+        silent: 是否静默模式（不打印详细信息）
     """
-    print(f"🔍 获取当前仓位信息...")
+    if not silent:
+        print(f"🔍 获取当前仓位信息...")
     
     try:
         # 构建查询参数
@@ -254,10 +263,12 @@ def get_current_positions(instType: str = "SWAP", instId: Optional[str] = None):
         positions = data.get("data", [])
         
         if not positions:
-            print("📭 没有找到任何仓位")
+            if not silent:
+                print("📭 没有找到任何仓位")
             return []
         
-        print(f"✅ 找到 {len(positions)} 个仓位:")
+        if not silent:
+            print(f"✅ 找到 {len(positions)} 个仓位:")
         
         active_positions = []
         for pos in positions:
@@ -266,21 +277,23 @@ def get_current_positions(instType: str = "SWAP", instId: Optional[str] = None):
             if position_size != 0:
                 active_positions.append(pos)
                 
-                print(f"\n📊 仓位详情:")
-                print(f"  🔹 合约: {pos.get('instId')}")
-                print(f"  📏 仓位大小: {position_size} 张")
-                print(f"  📈 方向: {'多头' if position_size > 0 else '空头'}")
-                print(f"  💰 平均开仓价: ${float(pos.get('avgPx', 0)):,.1f}")
-                print(f"  📊 标记价格: ${float(pos.get('markPx', 0)):,.1f}")
-                print(f"  💵 未实现盈亏: {float(pos.get('upl', 0)):,.6f} {pos.get('ccy')}")
-                print(f"  📈 盈亏率: {float(pos.get('uplRatio', 0)):.2%}")
-                print(f"  🎯 杠杆: {pos.get('lever')}x")
-                print(f"  📏 Position Size: {float(pos.get('pos', 0))} 张")
+                if not silent:
+                    print(f"\n📊 仓位详情:")
+                    print(f"  🔹 合约: {pos.get('instId')}")
+                    print(f"  📏 仓位大小: {position_size} 张")
+                    print(f"  📈 方向: {'多头' if position_size > 0 else '空头'}")
+                    print(f"  💰 平均开仓价: ${float(pos.get('avgPx', 0)):,.1f}")
+                    print(f"  📊 标记价格: ${float(pos.get('markPx', 0)):,.1f}")
+                    print(f"  💵 未实现盈亏: {float(pos.get('upl', 0)):,.6f} {pos.get('ccy')}")
+                    print(f"  📈 盈亏率: {float(pos.get('uplRatio', 0)):.2%}")
+                    print(f"  🎯 杠杆: {pos.get('lever')}x")
+                    print(f"  📏 Position Size: {float(pos.get('pos', 0))} 张")
         
         return active_positions
         
     except Exception as e:
-        print(f"❌ 获取仓位时出错: {e}")
+        if not silent:
+            print(f"❌ 获取仓位时出错: {e}")
         return []
 
 def close_position(instId: str, pos_side: Optional[str] = None):
@@ -734,6 +747,157 @@ def demo_order_management():
     return order_info
 
 # write a function place limit order based on ask-1 and bid-1
+
+def get_trade_fills_history(
+    instId: Optional[str] = None,
+    instType: str = "SWAP",
+    ordId: Optional[str] = None,
+    begin: Optional[str] = None,
+    end: Optional[str] = None,
+    limit: int = 100,
+    simulated: bool = False
+):
+    """
+    获取成交历史记录（过去3个月）
+    
+    OKX API: GET /api/v5/trade/fills-history
+    
+    Args:
+        instId: 合约ID，如"ETH-USD-SWAP"（可选）
+        instType: 产品类型，默认"SWAP"
+        ordId: 订单ID（可选）
+        begin: 开始时间戳（毫秒），如 "1597026383085"（可选）
+        end: 结束时间戳（毫秒），如 "1597026383085"（可选）
+        limit: 返回结果数量，默认100，最大100
+        simulated: 是否使用模拟盘，默认False（实盘）
+    
+    Returns:
+        list: 成交记录列表，每个成交包含：
+            - tradeId: 成交ID
+            - ordId: 订单ID
+            - instId: 合约ID
+            - side: 方向 (buy/sell)
+            - fillSz: 成交数量
+            - fillPx: 成交价格
+            - fillPnl: 该笔成交的已实现盈亏
+            - fee: 手续费
+            - ts: 成交时间戳
+    
+    示例:
+        # 获取 ETH-USD-SWAP 最近的成交
+        fills = get_trade_fills_history(instId="ETH-USD-SWAP")
+        
+        # 获取指定时间范围的成交
+        fills = get_trade_fills_history(
+            instId="ETH-USD-SWAP",
+            begin="1700000000000",  # 2023-11-15
+            end="1700086400000"     # 2023-11-16
+        )
+        
+        # 计算总 Realized P&L
+        total_realized_pnl = sum(float(f.get("fillPnl", 0)) for f in fills)
+    """
+    try:
+        # 构建查询参数
+        params = {
+            "instType": instType,
+            "limit": str(limit)
+        }
+        
+        if instId:
+            params["instId"] = instId
+        if ordId:
+            params["ordId"] = ordId
+        if begin:
+            params["begin"] = begin
+        if end:
+            params["end"] = end
+        
+        # 调用API
+        result = okx_get("/api/v5/trade/fills-history", params=params, simulated=simulated)
+        
+        fills = result.get("data", [])
+        
+        return fills
+        
+    except Exception as e:
+        print(f"❌ 获取成交历史失败: {e}")
+        return []
+
+def calculate_realized_pnl_from_fills(
+    instId: str,
+    begin: Optional[str] = None,
+    end: Optional[str] = None,
+    simulated: bool = False
+) -> float:
+    """
+    从成交历史计算指定合约的 Realized P&L
+    
+    Args:
+        instId: 合约ID，如"ETH-USD-SWAP"
+        begin: 开始时间戳（毫秒）（可选）
+        end: 结束时间戳（毫秒）（可选）
+        simulated: 是否使用模拟盘
+    
+    Returns:
+        float: 总已实现盈亏
+    
+    示例:
+        # 计算 ETH-USD-SWAP 的总 Realized P&L
+        realized_pnl = calculate_realized_pnl_from_fills("ETH-USD-SWAP")
+        print(f"Total Realized P&L: {realized_pnl:+.8f} ETH")
+    """
+    print(f"🔍 计算 {instId} 的 Realized P&L...")
+    
+    total_realized_pnl = 0.0
+    total_fee = 0.0
+    fill_count = 0
+    
+    # 获取成交历史（分页，每次最多100条）
+    limit = 100
+    after = None  # 用于分页
+    
+    while True:
+        params_dict = {
+            "instId": instId,
+            "limit": limit,
+            "simulated": simulated
+        }
+        
+        if begin:
+            params_dict["begin"] = begin
+        if end:
+            params_dict["end"] = end
+        if after:
+            params_dict["after"] = after
+        
+        fills = get_trade_fills_history(**params_dict)
+        
+        if not fills:
+            break
+        
+        for fill in fills:
+            fill_pnl = float(fill.get("fillPnl", 0))
+            fee = float(fill.get("fee", 0))
+            
+            total_realized_pnl += fill_pnl
+            total_fee += fee
+            fill_count += 1
+        
+        # 检查是否还有更多数据
+        if len(fills) < limit:
+            break
+        
+        # 获取最后一条记录的 ID 用于分页
+        after = fills[-1].get("tradeId")
+    
+    print(f"✅ 分析完成:")
+    print(f"   成交笔数: {fill_count}")
+    print(f"   Realized P&L: {total_realized_pnl:+.8f}")
+    print(f"   手续费: {total_fee:+.8f}")
+    print(f"   净盈亏: {(total_realized_pnl + total_fee):+.8f}")
+    
+    return total_realized_pnl
 
 
 if __name__ == "__main__":

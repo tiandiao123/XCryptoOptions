@@ -257,7 +257,7 @@ if __name__ == "__main__":
     config = load_straddle_config_okx()
     
     # 获取ATM期权
-    straddle_options = get_straddle_atm_options_okx(config, "BTC")
+    straddle_options = get_straddle_atm_options_okx(config, "ETH")
     
     if straddle_options:
         print(f"\n✅ 找到 {len(straddle_options)} 个适合Selling Straddle的ATM期权:")

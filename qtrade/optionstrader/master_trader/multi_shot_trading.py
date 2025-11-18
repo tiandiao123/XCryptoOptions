@@ -16,7 +16,7 @@ from qtrade.optionstrader.arbitrage_searcher.calendar_spread.calendar_spread_fin
     find_calendar_spread_options
 )
 from qtrade.optionstrader.arbitrage_searcher.option_data import CalendarSpreadOpportunity
-from qtrade.optionstrader.order_exp.async_coordinated_order_placer import place_calendar_spread_async
+from qtrade.optionstrader.master_trader.async_coordinated_order_placer import place_calendar_spread_async
 from qtrade.optionstrader.trading_engine.okx_engine.okx_risk_manager import OKXRiskManager
 
 
@@ -157,41 +157,28 @@ def execute_calendar_spread_trade(
 
 
 if __name__ == "__main__":
-    # 配置
+    # ==================== 全局配置 ====================
     calendar_config_path = "/home/ubuntu/options_trading/qtrade/optionstrader/arbitrage_searcher/calendar_spread/calendar_spread.yaml"
+    env = "mainnet"  # testnet 或 mainnet
+    crypto_notional = 1  # 每次交易的数量（ETH）
     
-    # Step 1: 获取交易机会
     print("\n" + "="*70)
-    print("📊 Calendar Spread 协同下单 + 风控监控测试")
+    print("🚀 Calendar Spread 自动化交易系统")
+    print("="*70)
+    print(f"   环境: {'🧪 DEMO' if env == 'testnet' else '🔴 LIVE'}")
+    print(f"   数量: {crypto_notional} ETH")
+    print(f"   策略: 循环寻找机会 → 下单 → 监控 → 平仓 → 重新寻找")
     print("="*70)
     
-    while True:
-        opportunity = get_calendar_spread_opportunity(
-            config_path=calendar_config_path, 
-            currency="ETH",
-            show_details=False  # 简化输出
-        )
-        if opportunity:
-            print("找到交易机会，开始执行交易")
-            break
-        print("未找到交易机会，等待30秒后重新获取")
-        time.sleep(30)
-    
-    if not opportunity:
-        print("\n❌ 未找到交易机会，退出")
-        exit(1)
-    
-    # Step 2: 初始化RiskManager
+    # ==================== Step 1: 初始化RiskManager ====================
     print(f"\n{'='*70}")
     print(f"🛡️  初始化RiskManager")
     print(f"{'='*70}")
     
-    env = "mainnet"  # testnet 或 mainnet
-    
     risk_manager = OKXRiskManager(
         symbol="ETHUSD",  # ETH期权
         max_positions=5,
-        enable_delta_hedge=True,
+        enable_delta_hedge=False,
         delta_hedge_threshold=0.05,
         stop_loss_ratio=-0.3,      # -30% 止损
         profit_target_ratio=0.5,   # +50% 止盈
@@ -205,7 +192,7 @@ if __name__ == "__main__":
     print(f"   Stop Loss: {risk_manager.stop_loss_ratio:.1%}")
     print(f"   Profit Target: {risk_manager.profit_target_ratio:.1%}")
     
-    # Step 3: 启动RiskManager监控线程
+    # ==================== Step 2: 启动RiskManager监控线程 ====================
     print(f"\n🔍 启动RiskManager后台监控线程...")
     
     def start_risk_monitoring():
@@ -225,63 +212,115 @@ if __name__ == "__main__":
     monitoring_thread.start()
     print(f"✅ 监控线程已启动 (线程ID: {monitoring_thread.ident})")
     
-    # Step 4: 确认交易参数
-    crypto_notional = 1  # 0.1 ETH
+    # ==================== Step 3: 主交易循环 ====================
     simulated = (env == "testnet")
+    trade_count = 0
     
-    print(f"\n📋 交易参数:")
-    print(f"   币种: ETH")
-    print(f"   数量: {crypto_notional} ETH")
-    print(f"   环境: {'🧪 DEMO' if simulated else '🔴 LIVE'}")
-    print(f"   策略: 异步协同下单 + 自动风控")
-    print(f"   Price Offset: 1 tick")
-    
-    # Step 5: 执行交易
-    time.sleep(10)
-    
-    result = execute_calendar_spread_trade(
-        opportunity=opportunity,
-        crypto_notional=crypto_notional,
-        risk_manager=risk_manager,  # 🆕 传入RiskManager
-        simulated=simulated,
-        price_offset_ticks=1,
-        poll_interval=0.3
-    )
-    
-    if result.get("success"):
-        print(f"\n{'='*70}")
-        print(f"🎉 交易执行成功！")
-        print(f"{'='*70}")
-        print(f"   总耗时: {result['total_time']:.2f}秒")
-        print(f"   触发腿: {result['winner'].upper()}")
-        
-        if result.get("risk_manager_added"):
-            print(f"\n🛡️  持仓已纳入风控监控")
-            print(f"   Position Key: {result.get('position_key')}")
-            print(f"\n📊 RiskManager将自动执行:")
-            print(f"   ✅ 实时P&L监控")
-            print(f"   ✅ 止损/止盈检查")
-            print(f"   ✅ IV反转监控")
-            print(f"   ✅ Delta对冲（如触发）")
-            print(f"\n💡 监控线程将持续运行...")
+    try:
+        while True:
+            trade_count += 1
             
-            # 保持主线程运行，让监控线程继续工作
-            try:
-                import time
-                count = 0
+            print(f"\n{'='*70}")
+            print(f"🔄 交易周期 #{trade_count}")
+            print(f"{'='*70}")
+            
+            # Step 3.1: 寻找交易机会
+            print(f"\n📊 正在寻找Calendar Spread机会...")
+            opportunity = None
+            search_attempts = 0
+            
+            while opportunity is None:
+                search_attempts += 1
+                print(f"   尝试 #{search_attempts}...")
+                
+                opportunity = get_calendar_spread_opportunity(
+                    config_path=calendar_config_path, 
+                    currency="ETH",
+                    show_details=False
+                )
+                
+                if opportunity:
+                    print(f"\n✅ 找到交易机会！")
+                    print(f"   Short: {opportunity.short_option.symbol}")
+                    print(f"   Long:  {opportunity.long_option.symbol}")
+                    print(f"   IV Spread: {opportunity.iv_spread:.2%}")
+                    break
+                else:
+                    print(f"   未找到机会，等待30秒后重试...")
+                    time.sleep(30)
+            
+            # Step 3.2: 执行交易
+            print(f"\n📋 执行交易参数:")
+            print(f"   币种: ETH")
+            print(f"   数量: {crypto_notional} ETH")
+            print(f"   环境: {'🧪 DEMO' if simulated else '🔴 LIVE'}")
+            print(f"   Price Offset: 1 tick")
+            
+            result = execute_calendar_spread_trade(
+                opportunity=opportunity,
+                crypto_notional=crypto_notional,
+                risk_manager=risk_manager,
+                simulated=simulated,
+                price_offset_ticks=1,
+                poll_interval=0.3
+            )
+            
+            if result.get("success"):
+                print(f"\n{'='*70}")
+                print(f"✅ 交易 #{trade_count} 执行成功！")
+                print(f"{'='*70}")
+                print(f"   总耗时: {result['total_time']:.2f}秒")
+                print(f"   触发腿: {result['winner'].upper()}")
+                print(f"   Position Key: {result.get('position_key')}")
+                
+                print(f"\n🛡️  持仓已纳入风控监控，等待平仓...")
+                print(f"   监控线程将自动执行:")
+                print(f"   ✅ 实时P&L监控")
+                print(f"   ✅ 止损/止盈检查 (SL: {risk_manager.stop_loss_ratio:.1%}, TP: {risk_manager.profit_target_ratio:.1%})")
+                print(f"   ✅ IV反转监控")
+                print(f"   ✅ Delta对冲（阈值: {risk_manager.delta_hedge_threshold}）")
+                
+                # Step 3.3: 等待持仓平仓
+                print(f"\n⏳ 等待持仓平仓...")
+                last_position_count = None
+                wait_count = 0
+                
                 while True:
-                    count += 1
-                    time.sleep(10)
-                    # 定期显示持仓状态
+                    wait_count += 1
+                    time.sleep(10)  # 每10秒检查一次
+                    
                     positions = risk_manager.get_position_count()
-
-                    if count % 100 == 0:
-                        print(f"count: {count}")
-                        print(f"\n📊 [{threading.current_thread().name}] 持仓状态: Calendar={positions['calendar_spread']}, Straddle={positions['straddle']}")
-            except KeyboardInterrupt:
-                print(f"\n\n🛑 用户中断，退出监控")
-        
-    else:
-        print(f"\n❌ 交易执行失败: {result.get('error')}")
+                    current_position_count = positions['calendar_spread'] + positions['straddle']
+                    
+                    # 定期显示状态（每分钟）
+                    if wait_count % 6 == 0:
+                        print(f"   [{wait_count//6}min] 持仓状态: Calendar={positions['calendar_spread']}, Straddle={positions['straddle']}")
+                    
+                    # 检测持仓变化
+                    if last_position_count is not None and current_position_count < last_position_count:
+                        print(f"\n   ⚠️ 检测到持仓减少: {last_position_count} → {current_position_count}")
+                    
+                    # 如果没有持仓了，说明已平仓
+                    if current_position_count == 0:
+                        print(f"\n✅ 持仓已全部平仓！")
+                        print(f"   等待时间: {wait_count * 10}秒 ({wait_count * 10 / 60:.1f}分钟)")
+                        break
+                    
+                    last_position_count = current_position_count
+                
+                # Step 3.4: 准备下一轮
+                print(f"\n🔄 交易周期 #{trade_count} 完成，准备下一轮...")
+                print(f"   等待10秒后开始寻找新机会...")
+                time.sleep(10)
+                
+            else:
+                print(f"\n❌ 交易 #{trade_count} 执行失败: {result.get('error')}")
+                print(f"   等待60秒后重试...")
+                time.sleep(60)
+                
+    except KeyboardInterrupt:
+        print(f"\n\n🛑 用户中断，退出交易循环")
+        print(f"   总共完成交易周期: {trade_count}")
+        print(f"   监控线程将自动停止...")
 
 

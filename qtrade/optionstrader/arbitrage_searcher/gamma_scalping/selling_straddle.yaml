@@ -66,28 +66,6 @@ vol_tracker_config:
   vol_calculation_method: "ewma"         # 波动率计算方法：ewma 或 garch
 
 # ============================================================================
-# SEARCH PARAMETERS - 搜索参数
-# ============================================================================
-
-search_config:
-  # 数据源
-  data_source: "deribit"                 # 数据源：deribit
-  
-  # 搜索范围
-  currencies: ["BTC"]                    # 搜索币种（暂时只考虑BTC）
-  option_types: ["C", "P"]               # 期权类型：Call和Put都需要
-  
-  # 结果控制
-  max_results: 5                         # 最大返回结果数
-  sort_by: "iv_premium"                  # 排序方式：iv_premium, total_premium, score
-  sort_order: "desc"                     # 排序顺序：desc=降序
-  
-  # 评分权重（用于最佳Straddle选择）
-  scoring_weights:
-    iv_weight: 0.7                       # IV权重（70%）
-    premium_weight: 0.3                  # 权利金权重（30%）
-
-# ============================================================================
 # RISK MANAGEMENT - 风险管理
 # ============================================================================
 
