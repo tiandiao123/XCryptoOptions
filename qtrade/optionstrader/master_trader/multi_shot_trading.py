@@ -6,9 +6,10 @@ Calendar Spread交易执行测试
 """
 
 import yaml
-import threading
 from typing import Optional
-import time 
+import time
+import matplotlib.pyplot as plt
+from datetime import datetime 
 
 from qtrade.optionstrader.arbitrage_searcher.calendar_spread.atm_options_okx import get_okx_atm_options
 from qtrade.optionstrader.arbitrage_searcher.calendar_spread.calendar_spread_finder import (
@@ -156,6 +157,86 @@ def execute_calendar_spread_trade(
     return result
 
 
+def plot_pnl_curve(pnl_history: list, timestamps: list, save_path: str = "/home/ubuntu/options_trading/pnl_curve.png"):
+    """
+    绘制累积P&L曲线
+    
+    Args:
+        pnl_history: P&L历史列表 [(trade_num, options_pnl, perp_pnl, total_pnl), ...]
+        timestamps: 时间戳列表
+        save_path: 保存路径
+    """
+    if not pnl_history:
+        print("⚠️ 没有P&L数据，跳过绘图")
+        return
+    
+    # 提取数据
+    trade_nums = [item[0] for item in pnl_history]
+    cumulative_options_pnl = []
+    cumulative_perp_pnl = []
+    cumulative_total_pnl = []
+    
+    cum_opt = 0.0
+    cum_perp = 0.0
+    cum_total = 0.0
+    
+    for _, opt_pnl, perp_pnl, total_pnl in pnl_history:
+        cum_opt += opt_pnl
+        cum_perp += perp_pnl
+        cum_total += total_pnl
+        
+        cumulative_options_pnl.append(cum_opt)
+        cumulative_perp_pnl.append(cum_perp)
+        cumulative_total_pnl.append(cum_total)
+    
+    # 创建图表
+    plt.figure(figsize=(14, 8))
+    
+    # 绘制累积P&L曲线
+    plt.plot(trade_nums, cumulative_total_pnl, 'b-o', linewidth=2, markersize=8, label='总累积P&L', alpha=0.8)
+    plt.plot(trade_nums, cumulative_options_pnl, 'g--^', linewidth=1.5, markersize=6, label='期权累积P&L', alpha=0.7)
+    
+    if any(perp != 0 for perp in cumulative_perp_pnl):
+        plt.plot(trade_nums, cumulative_perp_pnl, 'r--s', linewidth=1.5, markersize=6, label='永续累积P&L', alpha=0.7)
+    
+    # 添加零线
+    plt.axhline(y=0, color='gray', linestyle='--', linewidth=1, alpha=0.5)
+    
+    # 标注最终P&L
+    final_pnl = cumulative_total_pnl[-1]
+    plt.annotate(f'最终: {final_pnl:+.4f} ETH', 
+                 xy=(trade_nums[-1], final_pnl),
+                 xytext=(10, 10), textcoords='offset points',
+                 bbox=dict(boxstyle='round,pad=0.5', fc='yellow', alpha=0.7),
+                 arrowprops=dict(arrowstyle='->', connectionstyle='arc3,rad=0'))
+    
+    # 图表美化
+    plt.xlabel('交易编号', fontsize=12, fontweight='bold')
+    plt.ylabel('累积P&L (ETH)', fontsize=12, fontweight='bold')
+    plt.title(f'Calendar Spread交易累积收益曲线\n开始时间: {timestamps[0]} | 最新时间: {timestamps[-1]}', 
+              fontsize=14, fontweight='bold')
+    plt.legend(loc='best', fontsize=10)
+    plt.grid(True, alpha=0.3, linestyle='--')
+    
+    # 添加统计信息
+    win_count = sum(1 for _, _, _, total in pnl_history if total > 0)
+    loss_count = len(pnl_history) - win_count
+    win_rate = win_count / len(pnl_history) * 100 if pnl_history else 0
+    
+    stats_text = f'总交易: {len(pnl_history)}\n盈利: {win_count} | 亏损: {loss_count}\n胜率: {win_rate:.1f}%'
+    plt.text(0.02, 0.98, stats_text, transform=plt.gca().transAxes, 
+             fontsize=10, verticalalignment='top',
+             bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+    
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=150, bbox_inches='tight')
+    print(f"\n📊 P&L曲线图已保存: {save_path}")
+    
+    # 可选：也显示图表
+    # plt.show()
+    plt.close()
+
+
 if __name__ == "__main__":
     # ==================== 全局配置 ====================
     calendar_config_path = "/home/ubuntu/options_trading/qtrade/optionstrader/arbitrage_searcher/calendar_spread/calendar_spread.yaml"
@@ -192,29 +273,14 @@ if __name__ == "__main__":
     print(f"   Stop Loss: {risk_manager.stop_loss_ratio:.1%}")
     print(f"   Profit Target: {risk_manager.profit_target_ratio:.1%}")
     
-    # ==================== Step 2: 启动RiskManager监控线程 ====================
-    print(f"\n🔍 启动RiskManager后台监控线程...")
-    
-    def start_risk_monitoring():
-        """后台监控线程"""
-        try:
-            risk_manager.monitor_positions(check_duration="1min")
-        except KeyboardInterrupt:
-            print(f"\n🛑 监控线程收到中断信号")
-        except Exception as e:
-            print(f"\n❌ 监控线程异常: {e}")
-    
-    monitoring_thread = threading.Thread(
-        target=start_risk_monitoring,
-        daemon=True,
-        name="RiskMonitor"
-    )
-    monitoring_thread.start()
-    print(f"✅ 监控线程已启动 (线程ID: {monitoring_thread.ident})")
-    
-    # ==================== Step 3: 主交易循环 ====================
+    # ==================== Step 2: 主交易循环 ====================
     simulated = (env == "testnet")
     trade_count = 0
+    
+    # 🆕 P&L历史记录
+    pnl_history = []  # [(trade_num, options_pnl, perp_pnl, total_pnl), ...]
+    timestamps = []   # 每次交易的时间戳
+    cumulative_total_pnl = 0.0  # 全局累积P&L
     
     try:
         while True:
@@ -224,7 +290,15 @@ if __name__ == "__main__":
             print(f"🔄 交易周期 #{trade_count}")
             print(f"{'='*70}")
             
-            # Step 3.1: 寻找交易机会
+            # 🆕 Step 2.1: 重置 Realized P&L（开始新的交易周期）
+            print(f"\n🔄 重置P&L追踪...")
+            risk_manager.total_options_realized_pnl = 0.0
+            risk_manager.total_perp_realized_pnl = 0.0
+            risk_manager.perp_pnl_dict.clear()
+            risk_manager.last_perp_fill_time = None
+            print(f"✅ P&L已重置，开始新的交易周期")
+            
+            # Step 2.2: 寻找交易机会
             print(f"\n📊 正在寻找Calendar Spread机会...")
             opportunity = None
             search_attempts = 0
@@ -249,7 +323,7 @@ if __name__ == "__main__":
                     print(f"   未找到机会，等待30秒后重试...")
                     time.sleep(30)
             
-            # Step 3.2: 执行交易
+            # Step 2.3: 执行交易
             print(f"\n📋 执行交易参数:")
             print(f"   币种: ETH")
             print(f"   数量: {crypto_notional} ETH")
@@ -273,42 +347,46 @@ if __name__ == "__main__":
                 print(f"   触发腿: {result['winner'].upper()}")
                 print(f"   Position Key: {result.get('position_key')}")
                 
-                print(f"\n🛡️  持仓已纳入风控监控，等待平仓...")
-                print(f"   监控线程将自动执行:")
+                # 🆕 Step 2.4: 启动持仓监控（直接调用，无需线程）
+                print(f"\n{'='*70}")
+                print(f"🛡️  启动RiskManager持仓监控")
+                print(f"{'='*70}")
+                print(f"   监控功能:")
                 print(f"   ✅ 实时P&L监控")
                 print(f"   ✅ 止损/止盈检查 (SL: {risk_manager.stop_loss_ratio:.1%}, TP: {risk_manager.profit_target_ratio:.1%})")
                 print(f"   ✅ IV反转监控")
                 print(f"   ✅ Delta对冲（阈值: {risk_manager.delta_hedge_threshold}）")
+                print(f"\n⏳ 进入监控循环（持仓平仓后自动退出）...\n")
                 
-                # Step 3.3: 等待持仓平仓
-                print(f"\n⏳ 等待持仓平仓...")
-                last_position_count = None
-                wait_count = 0
+                # 直接调用监控（阻塞直到持仓平仓）
+                try:
+                    risk_manager.monitor_positions(check_duration="1min")
+                except Exception as e:
+                    print(f"\n❌ 监控异常: {e}")
                 
-                while True:
-                    wait_count += 1
-                    time.sleep(10)  # 每10秒检查一次
-                    
-                    positions = risk_manager.get_position_count()
-                    current_position_count = positions['calendar_spread'] + positions['straddle']
-                    
-                    # 定期显示状态（每分钟）
-                    if wait_count % 6 == 0:
-                        print(f"   [{wait_count//6}min] 持仓状态: Calendar={positions['calendar_spread']}, Straddle={positions['straddle']}")
-                    
-                    # 检测持仓变化
-                    if last_position_count is not None and current_position_count < last_position_count:
-                        print(f"\n   ⚠️ 检测到持仓减少: {last_position_count} → {current_position_count}")
-                    
-                    # 如果没有持仓了，说明已平仓
-                    if current_position_count == 0:
-                        print(f"\n✅ 持仓已全部平仓！")
-                        print(f"   等待时间: {wait_count * 10}秒 ({wait_count * 10 / 60:.1f}分钟)")
-                        break
-                    
-                    last_position_count = current_position_count
+                print(f"\n✅ 持仓监控已退出，持仓已全部平仓！")
                 
-                # Step 3.4: 准备下一轮
+                # 🆕 Step 2.6: 记录P&L到历史
+                options_pnl = risk_manager.total_options_realized_pnl
+                perp_pnl = risk_manager.total_perp_realized_pnl if risk_manager.enable_delta_hedge else 0.0
+                round_total_pnl = options_pnl + perp_pnl
+                
+                cumulative_total_pnl += round_total_pnl
+                
+                pnl_history.append((trade_count, options_pnl, perp_pnl, round_total_pnl))
+                timestamps.append(datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+                
+                print(f"📊 本轮交易P&L汇总:")
+                print(f"   期权已实现P&L: {options_pnl:+.8f} ETH")
+                if risk_manager.enable_delta_hedge:
+                    print(f"   永续已实现P&L: {perp_pnl:+.8f} ETH")
+                print(f"   本轮总P&L: {round_total_pnl:+.8f} ETH")
+                print(f"   累积总P&L: {cumulative_total_pnl:+.8f} ETH 📈")
+                
+                # 🆕 Step 2.7: 绘制P&L曲线
+                plot_pnl_curve(pnl_history, timestamps)
+                
+                # Step 2.8: 准备下一轮
                 print(f"\n🔄 交易周期 #{trade_count} 完成，准备下一轮...")
                 print(f"   等待10秒后开始寻找新机会...")
                 time.sleep(10)
@@ -320,7 +398,18 @@ if __name__ == "__main__":
                 
     except KeyboardInterrupt:
         print(f"\n\n🛑 用户中断，退出交易循环")
-        print(f"   总共完成交易周期: {trade_count}")
+        print(f"   总共完成交易周期: {len(pnl_history)}")
+        
+        if pnl_history:
+            print(f"\n📊 最终统计:")
+            print(f"   累积总P&L: {cumulative_total_pnl:+.8f} ETH")
+            print(f"   盈利次数: {sum(1 for _, _, _, total in pnl_history if total > 0)}")
+            print(f"   亏损次数: {sum(1 for _, _, _, total in pnl_history if total < 0)}")
+            
+            # 保存最终P&L曲线
+            print(f"\n📊 生成最终P&L曲线图...")
+            plot_pnl_curve(pnl_history, timestamps)
+        
         print(f"   监控线程将自动停止...")
 
 

@@ -93,6 +93,9 @@ class OKXRiskManager:
         self.total_perp_realized_pnl = 0.0  # 累积的已实现P&L
         self.last_perp_fill_time = None  # 最后一次成交时间（毫秒时间戳）
         
+        # 🆕 期权 Realized P&L 跟踪
+        self.total_options_realized_pnl = 0.0  # 期权平仓的累积已实现P&L
+        
         # 🆕 初始化 OKX 客户端
         simulated = (env == "testnet")
         self.options_client = OKXOptionsClient(simulated=simulated)
@@ -481,7 +484,33 @@ class OKXRiskManager:
                         # 检查订单是否成功（使用 success 字段）
                         if not call_result.get("success"):
                             raise Exception(f"Call平仓失败: {call_result}")
-                        self.logger.info(f"   ✅ Call: {position.call_option.symbol} - OrderID: {call_result.get('ordId')}")
+                        
+                        order_id = call_result.get('ordId')
+                        self.logger.info(f"   ✅ Call: {position.call_option.symbol} - OrderID: {order_id}")
+                        
+                        # 🆕 获取平仓P&L
+                        import time
+                        time.sleep(2)  # 等待订单成交
+                        
+                        try:
+                            order_details = self.options_client.get_order_details(
+                                inst_id=position.call_option.symbol,
+                                ord_id=order_id
+                            )
+                            
+                            if order_details:
+                                pnl = float(order_details.get('pnl', 0) or 0)
+                                avg_px = float(order_details.get('avgPx', 0) or 0)
+                                filled_sz = int(float(order_details.get('accFillSz', 0) or 0))
+                                fee = float(order_details.get('fee', 0) or 0)
+                                
+                                self.total_options_realized_pnl += pnl
+                                
+                                currency = position.call_option.symbol.split("-")[0]
+                                self.logger.info(f"   💰 Call平仓P&L: {pnl:+.8f} {currency}")
+                                self.logger.info(f"      成交: {filled_sz}张 @ {avg_px:.6f}, 手续费: {fee:+.8f}")
+                        except Exception as e:
+                            self.logger.warning(f"   ⚠️ 获取Call平仓P&L失败: {e}")
                     else:
                         self.logger.warning(f"⚠️ 无法获取Call价格，跳过")
                 else:
@@ -505,7 +534,33 @@ class OKXRiskManager:
                         # 检查订单是否成功（使用 success 字段）
                         if not put_result.get("success"):
                             raise Exception(f"Put平仓失败: {put_result}")
-                        self.logger.info(f"   ✅ Put: {position.put_option.symbol} - OrderID: {put_result.get('ordId')}")
+                        
+                        order_id = put_result.get('ordId')
+                        self.logger.info(f"   ✅ Put: {position.put_option.symbol} - OrderID: {order_id}")
+                        
+                        # 🆕 获取平仓P&L
+                        import time
+                        time.sleep(2)  # 等待订单成交
+                        
+                        try:
+                            order_details = self.options_client.get_order_details(
+                                inst_id=position.put_option.symbol,
+                                ord_id=order_id
+                            )
+                            
+                            if order_details:
+                                pnl = float(order_details.get('pnl', 0) or 0)
+                                avg_px = float(order_details.get('avgPx', 0) or 0)
+                                filled_sz = int(float(order_details.get('accFillSz', 0) or 0))
+                                fee = float(order_details.get('fee', 0) or 0)
+                                
+                                self.total_options_realized_pnl += pnl
+                                
+                                currency = position.put_option.symbol.split("-")[0]
+                                self.logger.info(f"   💰 Put平仓P&L: {pnl:+.8f} {currency}")
+                                self.logger.info(f"      成交: {filled_sz}张 @ {avg_px:.6f}, 手续费: {fee:+.8f}")
+                        except Exception as e:
+                            self.logger.warning(f"   ⚠️ 获取Put平仓P&L失败: {e}")
                     else:
                         self.logger.warning(f"⚠️ 无法获取Put价格，跳过")
                 else:
@@ -555,7 +610,33 @@ class OKXRiskManager:
                         # 检查订单是否成功（使用 success 字段）
                         if not short_result.get("success"):
                             raise Exception(f"Short平仓失败: {short_result}")
-                        self.logger.info(f"   ✅ Short: {position.short_option.symbol} - OrderID: {short_result.get('ordId')}")
+                        
+                        order_id = short_result.get('ordId')
+                        self.logger.info(f"   ✅ Short: {position.short_option.symbol} - OrderID: {order_id}")
+                        
+                        # 🆕 获取平仓P&L
+                        import time
+                        time.sleep(2)
+                        
+                        try:
+                            order_details = self.options_client.get_order_details(
+                                inst_id=position.short_option.symbol,
+                                ord_id=order_id
+                            )
+                            
+                            if order_details:
+                                pnl = float(order_details.get('pnl', 0) or 0)
+                                avg_px = float(order_details.get('avgPx', 0) or 0)
+                                filled_sz = int(float(order_details.get('accFillSz', 0) or 0))
+                                fee = float(order_details.get('fee', 0) or 0)
+                                
+                                self.total_options_realized_pnl += pnl
+                                
+                                currency = position.short_option.symbol.split("-")[0]
+                                self.logger.info(f"   💰 Short平仓P&L: {pnl:+.8f} {currency}")
+                                self.logger.info(f"      成交: {filled_sz}张 @ {avg_px:.6f}, 手续费: {fee:+.8f}")
+                        except Exception as e:
+                            self.logger.warning(f"   ⚠️ 获取Short平仓P&L失败: {e}")
                     else:
                         self.logger.warning(f"⚠️ 无法获取Short价格，跳过")
                 else:
@@ -579,7 +660,33 @@ class OKXRiskManager:
                         # 检查订单是否成功（使用 success 字段）
                         if not long_result.get("success"):
                             raise Exception(f"Long平仓失败: {long_result}")
-                        self.logger.info(f"   ✅ Long: {position.long_option.symbol} - OrderID: {long_result.get('ordId')}")
+                        
+                        order_id = long_result.get('ordId')
+                        self.logger.info(f"   ✅ Long: {position.long_option.symbol} - OrderID: {order_id}")
+                        
+                        # 🆕 获取平仓P&L
+                        import time
+                        time.sleep(2)
+                        
+                        try:
+                            order_details = self.options_client.get_order_details(
+                                inst_id=position.long_option.symbol,
+                                ord_id=order_id
+                            )
+                            
+                            if order_details:
+                                pnl = float(order_details.get('pnl', 0) or 0)
+                                avg_px = float(order_details.get('avgPx', 0) or 0)
+                                filled_sz = int(float(order_details.get('accFillSz', 0) or 0))
+                                fee = float(order_details.get('fee', 0) or 0)
+                                
+                                self.total_options_realized_pnl += pnl
+                                
+                                currency = position.long_option.symbol.split("-")[0]
+                                self.logger.info(f"   💰 Long平仓P&L: {pnl:+.8f} {currency}")
+                                self.logger.info(f"      成交: {filled_sz}张 @ {avg_px:.6f}, 手续费: {fee:+.8f}")
+                        except Exception as e:
+                            self.logger.warning(f"   ⚠️ 获取Long平仓P&L失败: {e}")
                     else:
                         self.logger.warning(f"⚠️ 无法获取Long价格，跳过")
                 else:
@@ -1007,8 +1114,8 @@ class OKXRiskManager:
                     except:
                         pass
                 
-                # 总P&L = 期权P&L + 永续合约总P&L
-                total_pnl = options_pnl + perp_total_pnl
+                # 总P&L = 期权未实现P&L + 期权已实现P&L + 永续合约总P&L
+                total_pnl = options_pnl + self.total_options_realized_pnl + perp_total_pnl
                 
                 # 打印综合信息
                 currency = self.realize_vol_extracter.symbol[:3]
@@ -1017,7 +1124,9 @@ class OKXRiskManager:
                 print(f"{'='*70}")
                 print(f"🎯 期权持仓:")
                 print(f"   Combined Delta: {total_net_delta:+.6f} {currency}")
-                print(f"   期权P&L (未实现): {options_pnl:+.8f} {currency}")
+                print(f"   未实现P&L: {options_pnl:+.8f} {currency}")
+                print(f"   已实现P&L: {self.total_options_realized_pnl:+.8f} {currency}")
+                print(f"   期权Total: {(options_pnl + self.total_options_realized_pnl):+.8f} {currency}")
                 print(f"\n🔒 永续合约对冲:")
                 print(f"   已对冲Delta: {self.current_hedged_delta:+.6f} {currency}")
                 print(f"   实际持仓Delta: {perp_delta:+.6f} {currency}")
@@ -1033,8 +1142,29 @@ class OKXRiskManager:
                     if self.enable_delta_hedge:
                         self.logger.info("📊 [MainThread] 当前无期权持仓，检查永续合约仓位...")
                         self._cleanup_orphan_perp_positions()
+                        
+                        # 🆕 检查是否还有永续合约仓位
+                        perp_positions_after_cleanup = get_current_positions(instType="SWAP", instId=instrument, silent=True)
+                        has_perp = False
+                        if perp_positions_after_cleanup:
+                            for pos in perp_positions_after_cleanup:
+                                if float(pos.get("pos", 0)) != 0:
+                                    has_perp = True
+                                    break
+                        
+                        # 如果无任何仓位，退出监控循环
+                        if not has_perp:
+                            self.logger.info("✅ [MainThread] 所有仓位已平仓，退出监控循环")
+                            self.logger.info(f"📊 最终统计:")
+                            self.logger.info(f"   期权已实现P&L: {self.total_options_realized_pnl:+.8f} {currency}")
+                            self.logger.info(f"   永续已实现P&L: {self.total_perp_realized_pnl:+.8f} {currency}")
+                            self.logger.info(f"   总已实现P&L: {(self.total_options_realized_pnl + self.total_perp_realized_pnl):+.8f} {currency}")
+                            break  # 退出while True循环
                     else:
-                        self.logger.debug("⏭️ [MainThread] 当前无期权持仓且未启用对冲，跳过永续合约检查")
+                        self.logger.debug("⏭️ [MainThread] 当前无期权持仓且未启用对冲，退出监控循环")
+                        self.logger.info(f"📊 最终统计:")
+                        self.logger.info(f"   期权已实现P&L: {self.total_options_realized_pnl:+.8f} {currency}")
+                        break  # 退出while True循环
                 else:
                     self.logger.info(f"📊 [MainThread] 持仓状态: Calendar={len(self.calendar_spread_positions)}, Straddle={len(self.straddle_positions)}")
                     
