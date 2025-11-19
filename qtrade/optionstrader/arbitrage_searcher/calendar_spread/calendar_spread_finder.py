@@ -333,23 +333,90 @@ def _evaluate_signal_strength(iv_spread: float, iv_spread_pct: float, time_gap_d
 def _sort_and_limit_opportunities(opportunities: List[CalendarSpreadOpportunity], config: Dict[str, Any]) -> List[CalendarSpreadOpportunity]:
     """
     排序和限制机会数量
+    
+    智能筛选逻辑：
+    1. 获取现货价格
+    2. 对于每个执行价组：
+       - 如果现货价 > 执行价：优先选择 PUT（OTM Put，虚值看跌）
+       - 如果现货价 < 执行价：优先选择 CALL（OTM Call，虚值看涨）
+    3. 在筛选后的机会中按IV价差排序
     """
     
     sort_by = config["search_config"]["sort_by"]
     sort_order = config["search_config"]["sort_order"]
     max_results = config["search_config"]["max_results"]
     
-    # 排序
+    if not opportunities:
+        return []
+    
+    # 🆕 获取现货价格
+    import requests
+    currency = _get_currency_from_symbol(opportunities[0].short_option.symbol)
+    
+    try:
+        inst_id = f"{currency}-USD"
+        url = "https://www.okx.com/api/v5/market/index-tickers"
+        params = {"instId": inst_id}
+        
+        resp = requests.get(url, params=params, timeout=5)
+        data = resp.json()
+        
+        if data.get("code") == "0" and data.get("data"):
+            spot_price = float(data["data"][0]["idxPx"])
+        else:
+            print(f"⚠️ 无法获取 {currency} 指数价格，使用第一个期权的执行价作为参考")
+            spot_price = opportunities[0].short_option.strike
+    except Exception as e:
+        print(f"⚠️ 获取指数价格失败: {e}，使用第一个期权的执行价作为参考")
+        spot_price = opportunities[0].short_option.strike
+    
+    print(f"\n📍 当前 {currency} 现货价格: ${spot_price:,.2f}")
+    
+    # 🆕 按执行价分组并智能筛选
+    grouped_by_strike = {}
+    for opp in opportunities:
+        strike = opp.short_option.strike
+        option_type = opp.short_option.option_type
+        
+        if strike not in grouped_by_strike:
+            grouped_by_strike[strike] = {"C": [], "P": []}
+        
+        grouped_by_strike[strike][option_type].append(opp)
+    
+    # 🆕 根据现货价格和执行价关系选择期权类型
+    selected_opportunities = []
+    
+    for strike, options_dict in grouped_by_strike.items():
+        calls = options_dict["C"]
+        puts = options_dict["P"]
+        
+        # 决策逻辑
+        if spot_price > strike:
+            # 现货价 > 执行价：选择 PUT（虚值看跌）
+            if puts:
+                # 在该执行价的所有 PUT 中选择 IV 价差最大的
+                best_put = max(puts, key=lambda x: x.iv_spread)
+                selected_opportunities.append(best_put)
+                print(f"   Strike ${strike:,.0f}: 选择 PUT (现货 ${spot_price:,.0f} > Strike，IV价差 {best_put.iv_spread:+.1%})")
+        else:
+            # 现货价 < 执行价：选择 CALL（虚值看涨）
+            if calls:
+                # 在该执行价的所有 CALL 中选择 IV 价差最大的
+                best_call = max(calls, key=lambda x: x.iv_spread)
+                selected_opportunities.append(best_call)
+                print(f"   Strike ${strike:,.0f}: 选择 CALL (现货 ${spot_price:,.0f} < Strike，IV价差 {best_call.iv_spread:+.1%})")
+    
+    # 🆕 在筛选后的机会中排序
     if sort_by == "iv_spread":
-        opportunities.sort(key=lambda x: x.iv_spread, reverse=(sort_order == "desc"))
+        selected_opportunities.sort(key=lambda x: x.iv_spread, reverse=(sort_order == "desc"))
     elif sort_by == "profit_potential":
-        opportunities.sort(key=lambda x: x.max_profit_potential, reverse=(sort_order == "desc"))
+        selected_opportunities.sort(key=lambda x: x.max_profit_potential, reverse=(sort_order == "desc"))
     else:
         # 默认按IV价差排序
-        opportunities.sort(key=lambda x: x.iv_spread, reverse=True)
+        selected_opportunities.sort(key=lambda x: x.iv_spread, reverse=True)
     
     # 限制数量并重新排名
-    limited_opportunities = opportunities[:max_results]
+    limited_opportunities = selected_opportunities[:max_results]
     for i, opp in enumerate(limited_opportunities):
         opp.rank = i + 1
     
@@ -368,37 +435,64 @@ def _get_currency_from_symbol(symbol: str) -> str:
     return "UNKNOWN"
 
 
-def display_calendar_opportunities(opportunities: List[CalendarSpreadOpportunity]) -> None:
+def display_calendar_opportunities(opportunities: List[CalendarSpreadOpportunity], 
+                                  log_file: str = None) -> None:
     """
     显示Calendar Spread机会
+    
+    Args:
+        opportunities: Calendar Spread机会列表
+        log_file: 可选的日志文件路径，如果提供则同时写入文件
     """
+    from datetime import datetime
+    
+    # 准备输出内容
+    lines = []
     
     if not opportunities:
-        print("❌ 未找到符合条件的Calendar Spread机会")
-        return
+        lines.append("❌ 未找到符合条件的Calendar Spread机会")
+    else:
+        lines.append(f"\n✅ 找到 {len(opportunities)} 个Calendar Spread机会:")
+        lines.append("=" * 100)
+        
+        for opp in opportunities:
+            # 从symbol中提取币种
+            currency = _get_currency_from_symbol(opp.short_option.symbol)
+            
+            lines.append(f"\n📊 机会 #{opp.rank} - 信号强度: {opp.signal_strength}")
+            
+            lines.append(f"\n   📉 短期期权 (卖出):")
+            lines.append(f"      {opp.short_option}")
+            
+            lines.append(f"\n   📈 长期期权 (买入):")
+            lines.append(f"      {opp.long_option}")
+            
+            lines.append(f"\n   💰 分析:")
+            lines.append(f"      IV价差: {opp.iv_spread:+.1%} ({opp.iv_spread_pct:+.1%})")
+            lines.append(f"      时间间隔: {opp.time_gap_days}天")
+            lines.append(f"      净保险费: {opp.net_premium:+.4f} {currency} {'(支出)' if opp.net_premium < 0 else '(收入)'}")
+            lines.append(f"      预期盈利潜力: {opp.max_profit_potential:.4f} {currency}")
+            
+            lines.append("-" * 100)
     
-    print(f"\n✅ 找到 {len(opportunities)} 个Calendar Spread机会:")
-    print("=" * 100)
+    # 打印到控制台
+    for line in lines:
+        print(line)
     
-    for opp in opportunities:
-        # 从symbol中提取币种
-        currency = _get_currency_from_symbol(opp.short_option.symbol)
-        
-        print(f"\n📊 机会 #{opp.rank} - 信号强度: {opp.signal_strength}")
-        
-        print(f"\n   📉 短期期权 (卖出):")
-        print(f"      {opp.short_option}")
-        
-        print(f"\n   📈 长期期权 (买入):")
-        print(f"      {opp.long_option}")
-        
-        print(f"\n   💰 分析:")
-        print(f"      IV价差: {opp.iv_spread:+.1%} ({opp.iv_spread_pct:+.1%})")
-        print(f"      时间间隔: {opp.time_gap_days}天")
-        print(f"      净保险费: {opp.net_premium:+.4f} {currency} {'(支出)' if opp.net_premium < 0 else '(收入)'}")
-        print(f"      预期盈利潜力: {opp.max_profit_potential:.4f} {currency}")
-        
-        print("-" * 100)
+    # 如果提供了日志文件路径，同时写入文件
+    if log_file:
+        try:
+            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            with open(log_file, 'a', encoding='utf-8') as f:
+                f.write(f"\n{'='*100}\n")
+                f.write(f"📅 时间戳: {timestamp}\n")
+                f.write(f"{'='*100}\n")
+                for line in lines:
+                    f.write(line + "\n")
+                f.write(f"\n{'='*100}\n\n")
+            print(f"\n📝 机会详情已保存到: {log_file}")
+        except Exception as e:
+            print(f"\n⚠️ 保存到文件失败: {e}")
 
 if __name__ == "__main__":
 

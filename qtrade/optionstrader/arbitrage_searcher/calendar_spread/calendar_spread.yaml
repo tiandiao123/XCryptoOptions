@@ -12,7 +12,7 @@ iv_criteria:
 
 # Strike Selection - 执行价选择
 strike_criteria:
-  atm_tolerance_pct: 0.03                # ATM容忍度：±3% of spot price
+  atm_tolerance_pct: 0.05                # ATM容忍度：±3% of spot price
   # abs(strike_price - spot_price) / spot_price <= 3%
 
 # Time Pairings - 时间配对

@@ -68,8 +68,9 @@ def get_calendar_spread_opportunity(
         print("❌ 未找到Calendar Spread机会")
         return None
 
-    # 3. 显示结果
-    display_calendar_opportunities(opportunities)
+    # 3. 显示结果（同时保存到日志文件）
+    log_file = "/home/ubuntu/options_trading/logs/calendar_opportunities.log"
+    display_calendar_opportunities(opportunities, log_file=log_file)
 
     # 返回最佳机会
     best_opportunity = opportunities[0]
@@ -206,11 +207,12 @@ if __name__ == "__main__":
     risk_manager = OKXRiskManager(
         symbol="ETHUSD",  # ETH期权
         max_positions=5,
-        enable_delta_hedge=False,
-        delta_hedge_threshold=0.05,
+        enable_delta_hedge=True,
+        delta_hedge_threshold=0.1,
         stop_loss_ratio=-0.3,      # -30% 止损
         profit_target_ratio=0.5,   # +50% 止盈
         price_change_risk_ratio=0.15,
+        hedge_freq=30, # 每30个监控周期执行一次对冲
         env=env
     )
     

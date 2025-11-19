@@ -69,8 +69,9 @@ def get_calendar_spread_opportunity(
         print("❌ 未找到Calendar Spread机会")
         return None
 
-    # 3. 显示结果
-    display_calendar_opportunities(opportunities)
+    # 3. 显示结果（同时保存到日志文件）
+    log_file = "/home/ubuntu/options_trading/logs/calendar_opportunities.log"
+    display_calendar_opportunities(opportunities, log_file=log_file)
 
     # 返回最佳机会
     best_opportunity = opportunities[0]
@@ -296,7 +297,11 @@ if __name__ == "__main__":
             risk_manager.total_perp_realized_pnl = 0.0
             risk_manager.perp_pnl_dict.clear()
             risk_manager.last_perp_fill_time = None
+            # 🆕 重置 RiskManager 启动时间（作为本轮P&L统计起点）
+            from datetime import datetime
+            risk_manager.risk_manager_start_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             print(f"✅ P&L已重置，开始新的交易周期")
+            print(f"   P&L统计起点: {risk_manager.risk_manager_start_time}")
             
             # Step 2.2: 寻找交易机会
             print(f"\n📊 正在寻找Calendar Spread机会...")

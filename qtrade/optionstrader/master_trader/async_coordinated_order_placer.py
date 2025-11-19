@@ -311,6 +311,7 @@ class AsyncCalendarSpreadCoordinator:
         """
         self.api = OKXAsyncAPI(client)
         self.opp = opportunity
+        self.opportunity = opportunity  # 添加这个以保持兼容性
         self.crypto_notional = crypto_notional
         self.price_offset_ticks = price_offset_ticks
         self.trigger_fill_ratio = trigger_fill_ratio
@@ -614,7 +615,7 @@ class AsyncCalendarSpreadCoordinator:
                 return {"success": False, "error": "Force order failed"}
     
     async def execute(self) -> Dict[str, Any]:
-        """执行完整的异步协同下单流程"""
+        """执行完整的异步协同下单流程（开仓）"""
         self.start_time = time.time()
         
         try:
@@ -704,6 +705,173 @@ class AsyncCalendarSpreadCoordinator:
                 await asyncio.gather(*cleanup_tasks, return_exceptions=True)
             
             raise
+    
+    async def close(self, aggressive: bool = False) -> Dict[str, Any]:
+        """
+        平仓Calendar Spread（反向操作）
+        
+        开仓时：Short卖出，Long买入
+        平仓时：Short买回，Long卖出
+        
+        Args:
+            aggressive: 是否激进平仓
+                - True: 直接对手方价格成交（快速）
+                - False: 挂限价单等待，任意一腿成交后另一腿aggressive成交（省成本）
+        
+        Returns:
+            执行结果
+        """
+        self.start_time = time.time()
+        
+        try:
+            # 计算平仓数量（与开仓时相同）
+            short_sz = self.api.client._contracts_from_crypto_notional(
+                self.opportunity.short_option.symbol,
+                self.crypto_notional
+            )
+            long_sz = self.api.client._contracts_from_crypto_notional(
+                self.opportunity.long_option.symbol,
+                self.crypto_notional
+            )
+            
+            print(f"\n{'='*70}")
+            print(f"🔻 异步协同平仓 Calendar Spread")
+            print(f"{'='*70}")
+            print(f"   Short (买回): {self.opportunity.short_option.symbol} × {short_sz} 张")
+            print(f"   Long (卖出):  {self.opportunity.long_option.symbol} × {long_sz} 张")
+            print(f"   模式: {'激进' if aggressive else '保守'}")
+            
+            if aggressive:
+                # 激进模式：直接对手方价格成交
+                print(f"\n💥 激进平仓：并发对手方价格成交...")
+                
+                short_close_task = self.api.place_aggressive(
+                    self.opportunity.short_option.symbol,
+                    "buy",  # 买回
+                    short_sz,
+                    2  # max_slippage_ticks
+                )
+                
+                long_close_task = self.api.place_aggressive(
+                    self.opportunity.long_option.symbol,
+                    "sell",  # 卖出
+                    long_sz,
+                    2
+                )
+                
+                short_order, long_order = await asyncio.gather(
+                    short_close_task,
+                    long_close_task
+                )
+                
+                print(f"   ✅ Short平仓: {short_order.order_id}")
+                print(f"   ✅ Long平仓: {long_order.order_id}")
+                
+                # 等待成交
+                await asyncio.sleep(2)
+                
+                short_final, long_final = await asyncio.gather(
+                    self.api.get_order(short_order.order_id),
+                    self.api.get_order(long_order.order_id)
+                )
+                
+            else:
+                # 保守模式：挂限价单，任意一腿成交后另一腿aggressive成交
+                print(f"\n🎯 保守平仓：挂限价单等待成交...")
+                
+                # 重置事件（如果之前用过）
+                self._done.clear()
+                self._winner = None
+                
+                # 获取盘口
+                loop = asyncio.get_event_loop()
+                short_ob_task = loop.run_in_executor(None, self.api.client.get_orderbook, self.opportunity.short_option.symbol)
+                long_ob_task = loop.run_in_executor(None, self.api.client.get_orderbook, self.opportunity.long_option.symbol)
+                short_inst_task = loop.run_in_executor(None, self.api.client.get_instrument_info, self.opportunity.short_option.symbol)
+                long_inst_task = loop.run_in_executor(None, self.api.client.get_instrument_info, self.opportunity.long_option.symbol)
+                
+                short_ob, long_ob, short_inst, long_inst = await asyncio.gather(
+                    short_ob_task, long_ob_task, short_inst_task, long_inst_task
+                )
+                
+                short_tick = float(short_inst.get("tickSz", 0.0001))
+                long_tick = float(long_inst.get("tickSz", 0.0001))
+                
+                # 计算挂单价格
+                short_price = short_ob["ask"] - short_tick  # 买回 → ask-1
+                long_price = long_ob["bid"] + long_tick    # 卖出 → bid+1
+                
+                print(f"   📝 Short买回: {short_price:.4f} (ask-1)")
+                print(f"   📝 Long卖出: {long_price:.4f} (bid+1)")
+                
+                # 挂单
+                short_order, long_order = await asyncio.gather(
+                    self.api.place_limit(self.opportunity.short_option.symbol, "buy", short_sz, short_price),
+                    self.api.place_limit(self.opportunity.long_option.symbol, "sell", long_sz, long_price)
+                )
+                
+                self._orders["short"] = short_order
+                self._orders["long"] = long_order
+                
+                print(f"   ✅ Short挂单: {short_order.order_id}")
+                print(f"   ✅ Long挂单: {long_order.order_id}")
+                
+                # 🆕 使用 _wait_till_trigger 异步监控（复用代码！）
+                print(f"\n🔍 启动异步监控（poll_interval={self.poll_interval}s）...")
+                
+                waiter_short = asyncio.create_task(
+                    self._wait_till_trigger("short", short_order.order_id, short_sz)
+                )
+                waiter_long = asyncio.create_task(
+                    self._wait_till_trigger("long", long_order.order_id, long_sz)
+                )
+                
+                # 等待任一腿触发
+                await self._done.wait()
+                self.trigger_time = time.time()
+                
+                # 确定赢家输家
+                async with self._lock:
+                    winner = self._winner
+                
+                if not winner:
+                    print("\n⚠️ 无触发腿，可能订单被取消")
+                    waiter_short.cancel()
+                    waiter_long.cancel()
+                    return {"success": False, "error": "No winner"}
+                
+                loser = "long" if winner == "short" else "short"
+                
+                # 🆕 收尾：撤单 + aggressive成交
+                await self._cancel_and_aggress(winner, loser)
+                
+                # 清理任务
+                waiter_short.cancel()
+                waiter_long.cancel()
+                
+                short_final = self._orders["short"]
+                long_final = self._orders["long"]
+            
+            total_time = time.time() - self.start_time
+            
+            print(f"\n{'='*70}")
+            print(f"✅ 平仓完成")
+            print(f"{'='*70}")
+            print(f"⏱️  总耗时: {total_time:.2f}秒")
+            print(f"📊 Short: {short_final.filled_sz}/{short_sz} @ {short_final.avg_px:.4f}")
+            print(f"📊 Long:  {long_final.filled_sz}/{long_sz} @ {long_final.avg_px:.4f}")
+            print(f"{'='*70}\n")
+            
+            return {
+                "success": True,
+                "total_time": total_time,
+                "short_close": short_final,
+                "long_close": long_final
+            }
+            
+        except Exception as e:
+            print(f"\n❌ 平仓失败: {e}")
+            return {"success": False, "error": str(e)}
 
 
 def place_calendar_spread_async(
@@ -731,4 +899,35 @@ def place_calendar_spread_async(
     
     # 运行异步协程
     return asyncio.run(coordinator.execute())
+
+
+def close_calendar_spread_async(
+    opportunity: CalendarSpreadOpportunity,
+    crypto_notional: float,
+    simulated: bool = True,
+    aggressive: bool = False
+) -> Dict[str, Any]:
+    """
+    便捷函数：异步平仓Calendar Spread持仓
+    
+    策略：
+    - aggressive=True: 直接对手方价格成交（快速）
+    - aggressive=False: 挂限价单，任意一腿成交后另一腿aggressive成交（降低滑点，默认）
+    
+    Args:
+        opportunity: Calendar Spread持仓信息
+        crypto_notional: 平仓数量（币本位）
+        simulated: 是否模拟盘
+        aggressive: 是否激进平仓（默认False=保守模式）
+    
+    Returns:
+        执行结果
+    """
+    client = OKXOptionsClient(simulated=simulated)
+    coordinator = AsyncCalendarSpreadCoordinator(
+        client, opportunity, crypto_notional
+    )
+    
+    # 运行异步协程
+    return asyncio.run(coordinator.close(aggressive=aggressive))
 

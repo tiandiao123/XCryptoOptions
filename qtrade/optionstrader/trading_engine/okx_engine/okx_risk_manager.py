@@ -96,17 +96,23 @@ class OKXRiskManager:
         # 🆕 期权 Realized P&L 跟踪
         self.total_options_realized_pnl = 0.0  # 期权平仓的累积已实现P&L
         
+        # 🆕 记录 RiskManager 启动时间（作为 P&L 计算的起点）
+        from datetime import datetime
+        self.risk_manager_start_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        
         # 🆕 初始化 OKX 客户端
         simulated = (env == "testnet")
         self.options_client = OKXOptionsClient(simulated=simulated)
         # Perp client 不需要单独初始化，使用函数式API
         
         self.logger.info(f"✅ [OKX] RiskManager 初始化完成")
+        self.logger.info(f"   启动时间: {self.risk_manager_start_time}")
         self.logger.info(f"   环境: {'模拟盘' if simulated else '实盘'}")
         self.logger.info(f"   最大持仓: {max_positions}")
         self.logger.info(f"   Delta对冲: {'启用' if enable_delta_hedge else '禁用'}")
         if enable_delta_hedge:
             self.logger.info(f"   对冲频率: 每 {hedge_freq} 个监控周期")
+            self.logger.info(f"   P&L统计起点: {self.risk_manager_start_time} (仅统计本轮交易)")
 
         # 初始化波动率跟踪器
         if "BTC" in symbol:
@@ -429,6 +435,8 @@ class OKXRiskManager:
     
     def close_positions(self, 
                         position: Union[StraddleOpportunityOKX, CalendarSpreadOpportunity], 
+                        use_async: bool = True, 
+                        use_aggressive: bool = False, 
                         env: str = "testnet", 
                         close_reason: str = "Unknown",
                         position_close_log: Optional[str] = None) -> Dict[str, Any]:
@@ -437,6 +445,8 @@ class OKXRiskManager:
         
         Args:
             position: 持仓对象
+            use_async: 是否使用异步协同平仓（仅支持Calendar Spread）
+            use_aggressive: 异步平仓时是否使用激进模式（默认False=保守模式）
             env: 交易环境
             close_reason: 平仓原因
             position_close_log: 日志文件路径
@@ -444,7 +454,99 @@ class OKXRiskManager:
         Returns:
             dict: 平仓结果
         """
-        close_amount = position.contracts 
+        close_amount = position.contracts
+        
+        # 🆕 如果使用异步平仓且是Calendar Spread
+        if use_async and isinstance(position, CalendarSpreadOpportunity):
+            self.logger.info(f"🚀 [OKX] 使用异步协同平仓 Calendar Spread")
+            self.logger.info(f"   模式: {'激进' if use_aggressive else '保守'}")
+            self.logger.info(f"   原因: {close_reason}")
+            
+            try:
+                from qtrade.optionstrader.master_trader.async_coordinated_order_placer import close_calendar_spread_async
+                
+                # 调用异步平仓函数
+                result = close_calendar_spread_async(
+                    opportunity=position,
+                    crypto_notional=close_amount,
+                    simulated=(env == "testnet"),
+                    aggressive=use_aggressive
+                )
+                
+                if result.get("success"):
+                    self.logger.info(f"✅ [OKX] 异步平仓成功")
+                    self.logger.info(f"   总耗时: {result.get('total_time', 0):.2f}秒")
+                    
+                    # 🆕 获取并累加realized P&L
+                    short_close = result.get("short_close")
+                    long_close = result.get("long_close")
+                    
+                    import time
+                    time.sleep(2)  # 等待订单完全处理
+                    
+                    total_pnl = 0.0
+                    currency = position.short_option.symbol.split("-")[0]
+                    
+                    # 查询Short腿的P&L
+                    if short_close and hasattr(short_close, 'order_id'):
+                        self.logger.info(f"   Short: {short_close.filled_sz}张 @ {short_close.avg_px:.6f}")
+                        
+                        try:
+                            short_order_details = self.options_client.get_order_details(
+                                inst_id=position.short_option.symbol,
+                                ord_id=short_close.order_id
+                            )
+                            
+                            if short_order_details:
+                                short_pnl = float(short_order_details.get('pnl', 0) or 0)
+                                short_fee = float(short_order_details.get('fee', 0) or 0)
+                                total_pnl += short_pnl
+                                
+                                self.logger.info(f"   💰 Short平仓P&L: {short_pnl:+.8f} {currency}")
+                                self.logger.info(f"      手续费: {short_fee:+.8f} {currency}")
+                        except Exception as e:
+                            self.logger.warning(f"   ⚠️ 获取Short P&L失败: {e}")
+                    
+                    # 查询Long腿的P&L
+                    if long_close and hasattr(long_close, 'order_id'):
+                        self.logger.info(f"   Long: {long_close.filled_sz}张 @ {long_close.avg_px:.6f}")
+                        
+                        try:
+                            long_order_details = self.options_client.get_order_details(
+                                inst_id=position.long_option.symbol,
+                                ord_id=long_close.order_id
+                            )
+                            
+                            if long_order_details:
+                                long_pnl = float(long_order_details.get('pnl', 0) or 0)
+                                long_fee = float(long_order_details.get('fee', 0) or 0)
+                                total_pnl += long_pnl
+                                
+                                self.logger.info(f"   💰 Long平仓P&L: {long_pnl:+.8f} {currency}")
+                                self.logger.info(f"      手续费: {long_fee:+.8f} {currency}")
+                        except Exception as e:
+                            self.logger.warning(f"   ⚠️ 获取Long P&L失败: {e}")
+                    
+                    # 累加到总realized P&L
+                    self.total_options_realized_pnl += total_pnl
+                    self.logger.info(f"   📊 本次平仓总P&L: {total_pnl:+.8f} {currency}")
+                    self.logger.info(f"   📊 累计已实现P&L: {self.total_options_realized_pnl:+.8f} {currency}")
+                    
+                    # 记录平仓信息
+                    if position_close_log:
+                        self._record_position_close(position, close_reason, position_close_log, env)
+                    
+                    return result
+                else:
+                    self.logger.error(f"❌ [OKX] 异步平仓失败: {result.get('error')}")
+                    # 失败则回退到传统平仓方式
+                    self.logger.warning(f"   ⚠️ 回退到传统平仓方式...")
+                    
+            except Exception as e:
+                self.logger.error(f"❌ [OKX] 异步平仓异常: {e}")
+                self.logger.warning(f"   ⚠️ 回退到传统平仓方式...")
+        
+        # 传统平仓方式（或异步平仓失败后的回退） 
 
         if isinstance(position, StraddleOpportunityOKX):
             # 平仓 Call 和 Put (使用限价单强制成交)
@@ -915,7 +1017,28 @@ class OKXRiskManager:
             # 关闭需要平仓的持仓
             for pos_type, pos_key, position, reason in positions_to_close:
                 try:
-                    self.close_positions(position, env, reason, position_close_log)
+                    # 🎯 根据平仓原因智能选择平仓模式
+                    # Delta风险过高 或 止损 → 使用传统平仓（快速）
+                    # 其他情况（止盈、IV反转等） → 使用异步保守平仓（节省成本）
+                    use_async = True
+                    use_aggressive = False
+                    
+                    if "Delta风险过高" in reason or "止损" in reason or "持仓腿缺失" in reason:
+                        use_async = False  # 紧急情况使用传统方式
+                        self.logger.info(f"⚠️ [OKX] 紧急平仓原因: {reason} → 使用传统平仓方式")
+                    elif isinstance(position, CalendarSpreadOpportunity):
+                        self.logger.info(f"💰 [OKX] 正常平仓原因: {reason} → 使用异步保守平仓")
+                    else:
+                        use_async = False  # Straddle暂不支持异步平仓
+                    
+                    self.close_positions(
+                        position=position, 
+                        use_async=use_async,
+                        use_aggressive=use_aggressive,
+                        env=env, 
+                        close_reason=reason, 
+                        position_close_log=position_close_log
+                    )
                     del self.straddle_positions[pos_key]
                     self.logger.info(f"✅ [OKX] 已关闭并移除Straddle持仓: {pos_key}")
                 except Exception as e:
@@ -987,7 +1110,28 @@ class OKXRiskManager:
             # 关闭需要平仓的持仓
             for pos_type, pos_key, position, reason in positions_to_close:
                 try:
-                    self.close_positions(position, env, reason, position_close_log)
+                    # 🎯 根据平仓原因智能选择平仓模式
+                    # Delta风险过高 或 止损 → 使用传统平仓（快速）
+                    # 其他情况（止盈、IV反转等） → 使用异步保守平仓（节省成本）
+                    use_async = True
+                    use_aggressive = False
+                    
+                    if "Delta风险过高" in reason or "止损" in reason or "持仓腿缺失" in reason:
+                        use_async = False  # 紧急情况使用传统方式
+                        self.logger.info(f"⚠️ [OKX] 紧急平仓原因: {reason} → 使用传统平仓方式")
+                    elif isinstance(position, CalendarSpreadOpportunity):
+                        self.logger.info(f"💰 [OKX] 正常平仓原因: {reason} → 使用异步保守平仓")
+                    else:
+                        use_async = False  # Straddle暂不支持异步平仓
+                    
+                    self.close_positions(
+                        position=position, 
+                        use_async=use_async,
+                        use_aggressive=use_aggressive,
+                        env=env, 
+                        close_reason=reason, 
+                        position_close_log=position_close_log
+                    )
                     del self.calendar_spread_positions[pos_key]
                     self.logger.info(f"✅ [OKX] 已关闭并移除Calendar持仓: {pos_key}")
                 except Exception as e:
@@ -1079,12 +1223,12 @@ class OKXRiskManager:
                 if self.enable_delta_hedge:
                     try:
                         from qtrade.optionstrader.trading_engine.okx_engine.perp_pnl_tracker import get_perp_realized_pnl
-                        from datetime import datetime, timedelta
                         
                         # 确定查询起始时间
                         if self.last_perp_fill_time is None:
-                            # 首次查询：从24小时前开始
-                            start_time = (datetime.now() - timedelta(hours=24)).strftime("%Y-%m-%d %H:%M:%S")
+                            # 首次查询：从 RiskManager 启动时间开始
+                            # 这样可以确保只统计本轮交易的 P&L，不会包含上一轮的历史数据
+                            start_time = self.risk_manager_start_time
                         else:
                             # 后续查询：使用上次的结束时间（函数内部会自动往前推5分钟）
                             start_time = str(self.last_perp_fill_time)
