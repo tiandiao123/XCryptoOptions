@@ -1,0 +1,904 @@
+#!/usr/bin/env python3
+import os, time, json, hmac, base64, hashlib, argparse, requests
+from typing import Optional, Dict, Any
+
+from qtrade.order_api.okx.func_call.perp.perp_orderbook import get_bid_ask
+from qtrade.order_api.okx.func_call.utils import get_current_btc_price, get_instrument_details
+
+OKX_BASE_URL = "https://www.okx.com"  # demo vs live decided by header
+
+# Check environment variable for simulated trading
+USE_SIMULATED = os.getenv("OKX_SIMULATED", "0") == "1"
+
+from qtrade.order_api.okx import API_KEY, API_SECRET, API_PASSPHRASE
+
+
+def rfc3339():
+    return time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime())
+
+def sign(timestamp: str, method: str, path: str, body: str, secret: str) -> str:
+    data = f"{timestamp}{method.upper()}{path}{body}"
+    digest = hmac.new(secret.encode(), data.encode(), hashlib.sha256).digest()
+    return base64.b64encode(digest).decode()
+
+def auth_headers(ts: str, sig: str, simulated: bool = False) -> Dict[str, str]:
+    """Generate authentication headers with optional simulated trading header"""
+    headers = {
+        "OK-ACCESS-KEY": API_KEY,
+        "OK-ACCESS-SIGN": sig,
+        "OK-ACCESS-TIMESTAMP": ts,
+        "OK-ACCESS-PASSPHRASE": API_PASSPHRASE,
+        "Content-Type": "application/json",
+    }
+    if simulated:
+        headers["x-simulated-trading"] = "1"
+    return headers
+
+def okx_post(path: str, payload: Dict[str, Any], simulated: bool = False) -> Dict[str, Any]:
+    """Make authenticated POST request with optional simulated trading"""
+    ts = rfc3339()
+    body = json.dumps(payload, separators=(",", ":"))
+    sig = sign(ts, "POST", path, body, API_SECRET)
+    resp = requests.post(
+        OKX_BASE_URL + path,
+        headers=auth_headers(ts, sig, simulated=simulated),
+        data=body,
+        timeout=15,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    if data.get("code") not in ("0", 0, None):
+        raise RuntimeError(f"OKX error {data.get('code')}: {data.get('msg')} | data={data}")
+    return data
+
+def okx_get(path: str, params: Optional[Dict[str, Any]] = None, simulated: bool = False) -> Dict[str, Any]:
+    """Make authenticated GET request with optional simulated trading
+    
+    Args:
+        path: API路径，如 "/api/v5/trade/fills-history"
+        params: 查询参数字典
+        simulated: 是否使用模拟盘
+    
+    Returns:
+        dict: API响应数据
+    """
+    ts = rfc3339()
+    query_string = ""
+    if params:
+        # 构建查询字符串
+        query_parts = [f"{k}={v}" for k, v in params.items() if v is not None]
+        if query_parts:
+            query_string = "?" + "&".join(query_parts)
+    
+    # 签名时需要包含查询字符串
+    full_path = path + query_string
+    sig = sign(ts, "GET", full_path, "", API_SECRET)
+    
+    resp = requests.get(
+        OKX_BASE_URL + full_path,
+        headers=auth_headers(ts, sig, simulated),
+        timeout=15,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    if data.get("code") not in ("0", 0, None):
+        raise RuntimeError(f"OKX error {data.get('code')}: {data.get('msg')} | data={data}")
+    return data
+
+
+
+def place_inverse_perp_order(
+    instId: str,
+    side: str,            # "buy" or "sell"
+    sz_contracts: int,    # contracts (integer)
+    ordType: str = "market",  # "market" or "limit"
+    px: Optional[float] = None,
+    posSide: Optional[str] = None,  # if hedge mode, use "long"/"short"
+    tdMode: str = "cross",
+    clOrdId: Optional[str] = None,
+    simulated: bool = False,  # Use simulated trading
+):
+    payload = {
+        "instId": instId,
+        "tdMode": tdMode,
+        "side": side.lower(),
+        "ordType": ordType.lower(),
+        "sz": str(int(sz_contracts)),
+    }
+    if px is not None and ordType.lower() == "limit":
+        payload["px"] = str(px)
+    if clOrdId:
+        payload["clOrdId"] = clOrdId
+    if posSide:
+        payload["posSide"] = posSide  # required when hedge mode is enabled
+    result = okx_post("/api/v5/trade/order", payload, simulated=simulated)
+
+    if result.get("code") == "0":
+        order_data = result.get("data", [])
+        if order_data:
+            order_id = order_data[0].get("ordId")
+            print(f"✅ 订单提交成功!")
+            print(f"  📝 订单ID: {order_id}")
+            return order_id, result
+        else:
+            print(f"❌ 订单提交失败: 无订单数据")
+            return None, result
+    else:
+        print(f"❌ 订单提交失败: {result}")
+        return None, result
+
+
+def place_inverse_perp_order_crypto_notional(
+    instId: str,
+    side: str,
+    crypto_notional: float,
+    ordType: str = "market",
+    px: Optional[float] = None,
+    posSide: Optional[str] = None,
+    tdMode: str = "cross",
+    clOrdId: Optional[str] = None,
+    simulated: bool = False,
+):
+    """
+    Place inverse perpetual order with crypto notional (BTC or ETH).
+    
+    Supports both BTC-USD-SWAP and ETH-USD-SWAP contracts.
+    Automatically detects currency and converts crypto amount to contracts.
+    
+    Args:
+        instId: Contract ID, e.g., "BTC-USD-SWAP" or "ETH-USD-SWAP"
+        side: "buy" or "sell"
+        crypto_notional: Crypto amount (e.g., 0.05 ETH or 0.001 BTC)
+        ordType: "market" or "limit"
+        px: Price (required for limit orders)
+        posSide: Position side for hedge mode ("long"/"short")
+        tdMode: Trade mode ("cross" or "isolated")
+        clOrdId: Client order ID
+        simulated: If True, use simulated trading environment
+        
+    Returns:
+        Tuple[order_id, result]: Order ID and API response
+        
+    Example:
+        # Open 0.05 ETH short position
+        order_id, result = place_inverse_perp_order_crypto_notional(
+            instId="ETH-USD-SWAP",
+            side="sell",
+            crypto_notional=0.05,
+            simulated=True
+        )
+    """
+    # Automatically detect currency from instId
+    if "BTC" in instId:
+        current_price = get_current_btc_price("BTC-USD-SWAP")
+        currency = "BTC"
+    elif "ETH" in instId:
+        current_price = get_current_btc_price("ETH-USD-SWAP")
+        currency = "ETH"
+    else:
+        raise ValueError(f"Unsupported instId: {instId}. Only BTC-USD-SWAP and ETH-USD-SWAP are supported.")
+    
+    if not current_price:
+        raise RuntimeError(f"Failed to get current price for {instId}")
+    
+    env_str = "🟡 DEMO" if simulated else "🔴 LIVE"
+    print(f"[{env_str}] Current {currency} SWAP price: ${current_price:,.2f}")
+
+    # Calculate USD notional value
+    total_amount_in_usd = crypto_notional * current_price
+    
+    # Get contract value from API (BTC=100, ETH=10)
+    ct_val = get_instrument_details(instId=instId)["ctVal"]
+    ct_val_int = int(ct_val)
+    print(f"Contract value: {ct_val_int} USD per contract")
+    
+    # Calculate number of contracts
+    num_of_contracts = int(total_amount_in_usd / ct_val_int)
+    print(f"📊 Conversion: {crypto_notional} {currency} × ${current_price:,.2f} = ${total_amount_in_usd:.2f} → {num_of_contracts} contracts")
+
+    if num_of_contracts == 0:
+        raise ValueError(f"Crypto notional {crypto_notional} {currency} is too small. Need at least ${ct_val_int} USD worth.")
+
+    return place_inverse_perp_order(
+        instId=instId,
+        side=side,
+        sz_contracts=num_of_contracts,
+        ordType=ordType,
+        px=px,
+        posSide=posSide,
+        tdMode=tdMode,
+        clOrdId=clOrdId,
+        simulated=simulated,
+    )
+
+
+def place_inverse_perp_order_with_btc_notional(
+    instId: str,
+    side: str,
+    btc_notional: float,
+    ordType: str = "market",
+    px: Optional[float] = None,
+    posSide: Optional[str] = None,
+    tdMode: str = "cross",
+    clOrdId: Optional[str] = None,
+    simulated: bool = False,
+):
+    """
+    DEPRECATED: Use place_inverse_perp_order_crypto_notional() instead.
+    
+    This function is kept for backward compatibility.
+    Despite the name 'btc_notional', it works for both BTC and ETH.
+    """
+    return place_inverse_perp_order_crypto_notional(
+        instId=instId,
+        side=side,
+        crypto_notional=btc_notional,
+        ordType=ordType,
+        px=px,
+        posSide=posSide,
+        tdMode=tdMode,
+        clOrdId=clOrdId,
+        simulated=simulated,
+    )
+
+def get_current_positions(instType: str = "SWAP", instId: Optional[str] = None, silent: bool = False):
+    """
+    获取当前仓位信息
+    Args:
+        instType: 产品类型，默认为"SWAP"
+        instId: 特定合约ID，如"BTC-USD-SWAP"，为None时获取所有仓位
+        silent: 是否静默模式（不打印详细信息）
+    """
+    if not silent:
+        print(f"🔍 获取当前仓位信息...")
+    
+    try:
+        # 构建查询参数
+        params = {"instType": instType}
+        if instId:
+            params["instId"] = instId
+        
+        data = okx_get("/api/v5/account/positions", params)
+        
+        positions = data.get("data", [])
+        
+        if not positions:
+            if not silent:
+                print("📭 没有找到任何仓位")
+            return []
+        
+        if not silent:
+            print(f"✅ 找到 {len(positions)} 个仓位:")
+        
+        active_positions = []
+        for pos in positions:
+            # 只显示有实际持仓的合约（pos不为0）
+            position_size = float(pos.get("pos", 0))
+            if position_size != 0:
+                active_positions.append(pos)
+                
+                if not silent:
+                    print(f"\n📊 仓位详情:")
+                    print(f"  🔹 合约: {pos.get('instId')}")
+                    print(f"  📏 仓位大小: {position_size} 张")
+                    print(f"  📈 方向: {'多头' if position_size > 0 else '空头'}")
+                    print(f"  💰 平均开仓价: ${float(pos.get('avgPx', 0)):,.1f}")
+                    print(f"  📊 标记价格: ${float(pos.get('markPx', 0)):,.1f}")
+                    print(f"  💵 未实现盈亏: {float(pos.get('upl', 0)):,.6f} {pos.get('ccy')}")
+                    print(f"  📈 盈亏率: {float(pos.get('uplRatio', 0)):.2%}")
+                    print(f"  🎯 杠杆: {pos.get('lever')}x")
+                    print(f"  📏 Position Size: {float(pos.get('pos', 0))} 张")
+        
+        return active_positions
+        
+    except Exception as e:
+        if not silent:
+            print(f"❌ 获取仓位时出错: {e}")
+        return []
+
+def close_position(instId: str, pos_side: Optional[str] = None):
+    """
+    平仓指定合约的仓位
+    Args:
+        instId: 合约ID，如"BTC-USD-SWAP"
+        pos_side: 仓位方向，net模式下为None，hedge模式下为"long"或"short"
+    """
+    print(f"🔄 准备平仓 {instId}...")
+    
+    # 首先获取当前仓位信息
+    positions = get_current_positions(instId=instId)
+    
+    if not positions:
+        print(f"❌ 没有找到 {instId} 的活跃仓位")
+        return None
+    
+    for pos in positions:
+        if pos.get("instId") == instId:
+            position_size = float(pos.get("pos", 0))
+            
+            if position_size == 0:
+                print(f"⚠️  {instId} 仓位大小为0，无需平仓")
+                continue
+            
+            # 确定平仓方向：多头仓位用sell平仓，空头仓位用buy平仓
+            close_side = "sell" if position_size > 0 else "buy"
+            close_size = abs(int(position_size))  # 平仓数量为仓位绝对值
+            
+            print(f"📤 执行平仓:")
+            print(f"  🎯 合约: {instId}")
+            print(f"  📏 仓位: {position_size} 张")
+            print(f"  🔄 平仓方向: {close_side}")
+            print(f"  📊 平仓数量: {close_size} 张")
+            
+            try:
+                # 执行市价平仓单
+                result = place_inverse_perp_order(
+                    instId=instId,
+                    side=close_side,
+                    sz_contracts=close_size,
+                    ordType="market",  # 市价单确保成交
+                    posSide=pos_side,
+                    tdMode="cross"
+                )
+                
+                if result.get("code") == "0":
+                    order_data = result.get("data", [])
+                    if order_data:
+                        order_id = order_data[0].get("ordId")
+                        print(f"✅ 平仓订单提交成功!")
+                        print(f"  📝 订单ID: {order_id}")
+                        print(f"  💰 预期平仓: {close_size} 张 {instId}")
+                        return order_id
+                    else:
+                        print(f"❌ 平仓订单提交失败: 无订单数据")
+                else:
+                    print(f"❌ 平仓失败: {result}")
+                    
+            except Exception as e:
+                print(f"❌ 平仓时出错: {e}")
+                
+    return None
+
+def close_all_positions():
+    """
+    平掉所有活跃仓位
+    """
+    print(f"🚨 准备平掉所有活跃仓位...")
+    
+    # 获取所有仓位
+    positions = get_current_positions()
+    
+    if not positions:
+        print(f"✅ 没有活跃仓位需要平仓")
+        return []
+    
+    closed_orders = []
+    
+    for pos in positions:
+        inst_id = pos.get("instId")
+        position_size = float(pos.get("pos", 0))
+        
+        if position_size != 0:
+            print(f"\n🎯 平仓 {inst_id}...")
+            order_id = close_position(inst_id)
+            if order_id:
+                closed_orders.append({
+                    "instId": inst_id,
+                    "orderId": order_id,
+                    "originalPosition": position_size
+                })
+    
+    print(f"\n✅ 平仓操作完成，共提交 {len(closed_orders)} 个平仓订单")
+    return closed_orders
+
+def check_order_status(ord_id: str, inst_id: str):
+    """
+    检查订单状态
+    """
+    try:
+        params = {
+            "ordId": ord_id,
+            "instId": inst_id
+        }
+        
+        result = okx_get("/api/v5/trade/order", params)
+        
+        if result.get("data"):
+            order_info = result["data"][0]
+            status = order_info.get("state")
+            filled_sz = order_info.get("fillSz", "0")
+            
+            print(f"📋 订单状态:")
+            print(f"  🆔 订单ID: {ord_id}")
+            print(f"  📊 状态: {status}")
+            print(f"  ✅ 已成交: {filled_sz} 张")
+            
+            return order_info
+        else:
+            print(f"❌ 查询订单状态失败: {result}")
+            return None
+            
+    except Exception as e:
+        print(f"❌ 查询订单状态时出错: {e}")
+        return None
+
+def get_pending_orders(instType: str = "SWAP", instId: Optional[str] = None):
+    """
+    获取未成交订单
+    Args:
+        instType: 产品类型，默认为"SWAP"
+        instId: 特定合约ID，如"BTC-USD-SWAP"，为None时获取所有订单
+    """
+    print(f"🔍 获取未成交订单...")
+    
+    try:
+        # 构建查询参数
+        params = {"instType": instType}
+        if instId:
+            params["instId"] = instId
+        
+        data = okx_get("/api/v5/trade/orders-pending", params)
+        
+        orders = data.get("data", [])
+        
+        if not orders:
+            print("📭 没有找到未成交订单")
+            return []
+        
+        print(f"✅ 找到 {len(orders)} 个未成交订单:")
+        
+        for order in orders:
+            order_id = order.get("ordId")
+            inst_id = order.get("instId")
+            side = order.get("side")
+            order_type = order.get("ordType")
+            price = float(order.get("px", 0))
+            size = float(order.get("sz", 0))
+            filled_size = float(order.get("fillSz", 0))
+            remaining_size = size - filled_size
+            state = order.get("state")
+            
+            print(f"\n📋 订单详情:")
+            print(f"  🆔 订单ID: {order_id}")
+            print(f"  🔹 合约: {inst_id}")
+            print(f"  📈 方向: {'买入' if side == 'buy' else '卖出'}")
+            print(f"  🎯 类型: {order_type.upper()}")
+            print(f"  💰 价格: ${price:,.1f}")
+            print(f"  📊 数量: {size} 张")
+            print(f"  ✅ 已成交: {filled_size} 张")
+            print(f"  ⏳ 剩余: {remaining_size} 张")
+            print(f"  📍 状态: {state}")
+        
+        return orders
+        
+    except Exception as e:
+        print(f"❌ 获取订单时出错: {e}")
+        return []
+
+def cancel_order(ord_id: str, inst_id: str):
+    """
+    取消指定订单 - 支持限价单和市价单
+    Args:
+        ord_id: 订单ID
+        inst_id: 合约ID
+    Returns:
+        bool: 取消是否成功
+    """
+    print(f"🚫 准备取消订单 {ord_id}...")
+    
+    try:
+        payload = {
+            "ordId": ord_id,
+            "instId": inst_id
+        }
+        
+        result = okx_post("/api/v5/trade/cancel-order", payload)
+        
+        if result.get("code") == "0":
+            cancel_data = result.get("data", [])
+            if cancel_data:
+                cancel_info = cancel_data[0]
+                cancel_result = cancel_info.get("sCode")
+                cancel_msg = cancel_info.get("sMsg")
+                
+                if cancel_result == "0":
+                    print(f"✅ 订单取消成功!")
+                    print(f"  🆔 订单ID: {cancel_info.get('ordId')}")
+                    print(f"  📊 结果: {cancel_msg}")
+                    return True
+                else:
+                    print(f"⚠️ 订单取消失败: {cancel_result} - {cancel_msg}")
+                    return False
+            else:
+                print(f"❌ 取消失败: 无返回数据")
+                return False
+        else:
+            print(f"❌ 取消失败: {result}")
+            return False
+            
+    except Exception as e:
+        print(f"❌ 取消订单时出错: {e}")
+        return False
+
+def cancel_all_orders(instId: Optional[str] = None):
+    """
+    取消所有未成交订单
+    Args:
+        instId: 特定合约ID，为None时取消所有合约的订单
+    Returns:
+        list: 成功取消的订单列表
+    """
+    print(f"🚨 准备取消所有未成交订单...")
+    
+    # 获取所有未成交订单
+    orders = get_pending_orders(instId=instId)
+    
+    if not orders:
+        print(f"✅ 没有未成交订单需要取消")
+        return []
+    
+    cancelled_orders = []
+    
+    for order in orders:
+        order_id = order.get("ordId")
+        inst_id = order.get("instId")
+        order_type = order.get("ordType")
+        
+        print(f"\n🎯 取消订单 {order_id} ({inst_id}, {order_type.upper()})...")
+        success = cancel_order(order_id, inst_id)
+        if success:
+            cancelled_orders.append({
+                "orderId": order_id,
+                "instId": inst_id,
+                "orderType": order_type
+            })
+    
+    print(f"\n✅ 取消操作完成，共取消 {len(cancelled_orders)} 个订单")
+    return cancelled_orders
+
+def place_and_track_order(
+    instId: str,
+    side: str,
+    btc_notional: float,
+    ordType: str = "limit",
+    price_offset: float = -50.0,  # 价格偏移量（USD）
+    posSide: Optional[str] = None,
+    tdMode: str = "cross"
+):
+    """
+    下单并跟踪订单号（特别适用于limit订单）
+    Args:
+        price_offset: 相对于当前价格的偏移量，负数表示低于市价
+    Returns:
+        dict: 包含订单信息的字典，包括orderId
+    """
+    print(f"🚀 下单并跟踪...")
+    
+    # 获取当前价格
+    current_price = get_current_btc_price(instId)
+    if not current_price:
+        print("❌ 无法获取当前价格")
+        return None
+    
+    # 计算订单价格
+    if ordType.lower() == "limit":
+        order_price = current_price + price_offset
+        print(f"💰 当前价格: ${current_price:,.1f}")
+        print(f"📊 订单价格: ${order_price:,.1f} (偏移: ${price_offset:+.1f})")
+    else:
+        order_price = None
+        print(f"💰 市价单，当前价格: ${current_price:,.1f}")
+    
+    try:
+        # 下单 - 这会返回 (order_id, result) 或 (None, result)
+        order_id, order_result = place_inverse_perp_order_with_btc_notional(
+            instId=instId,
+            side=side,
+            btc_notional=btc_notional,
+            ordType=ordType,
+            px=order_price,
+            posSide=posSide,
+            tdMode=tdMode
+        )
+        
+        if order_id:
+            print(f"✅ 订单提交成功!")
+            print(f"  🆔 订单ID: {order_id}")
+            print(f"  📊 合约: {instId}")
+            print(f"  📈 方向: {side}")
+            print(f"  💰 BTC名义: {btc_notional} BTC")
+            print(f"  🎯 类型: {ordType.upper()}")
+            
+            # 返回订单信息
+            return {
+                "success": True,
+                "orderId": order_id,
+                "instId": instId,
+                "side": side,
+                "ordType": ordType,
+                "price": order_price,
+                "btc_notional": btc_notional,
+                "result": order_result
+            }
+        else:
+            print(f"❌ 订单提交失败")
+            return {
+                "success": False,
+                "orderId": None,
+                "error": order_result
+            }
+        
+    except Exception as e:
+        print(f"❌ 下单时出错: {e}")
+        return {
+            "success": False,
+            "orderId": None,
+            "error": str(e)
+        }
+
+def place_limit_order_relative_to_book(
+    instId: str,
+    side: str,
+    crypto_notional: float,
+    offset_usd: float = 0,  # +/- USD from bid/ask
+    posSide: Optional[str] = None,
+    tdMode: str = "cross",
+    simulated: bool = False
+):
+    """
+    基于订单簿的bid-1/ask-1价格下限价单
+    
+    Args:
+        instId: 合约ID (e.g., "BTC-USD-SWAP" or "ETH-USD-SWAP")
+        side: "buy" 或 "sell"
+        crypto_notional: 加密货币数量 (e.g., 0.05 ETH or 0.001 BTC)
+        offset_usd: 价格偏移，正数=高于bid/ask，负数=低于bid/ask
+        posSide: 持仓方向
+        tdMode: 保证金模式 ("cross" 或 "isolated")
+        simulated: 是否使用模拟盘
+        
+    Returns:
+        dict: 订单信息，包含orderId
+    """
+    
+    print(f"📊 基于订单簿下{side}单...")
+    
+    # 获取当前订单簿
+    book = get_bid_ask(instId)
+    if not book:
+        return {"success": False, "error": "Failed to get orderbook"}
+    
+    # 根据买卖方向确定限价
+    if side.lower() == "buy":
+        # 买单：基于bid-1价格
+        limit_price = book["bid"] + offset_usd
+        print(f"💰 当前Bid-1: ${book['bid']:,.1f}")
+        print(f"🎯 买单限价: ${limit_price:,.1f} (偏移: ${offset_usd:+.1f})")
+    else:
+        # 卖单：基于ask-1价格  
+        limit_price = book["ask"] + offset_usd
+        print(f"💰 当前Ask-1: ${book['ask']:,.1f}")
+        print(f"🎯 卖单限价: ${limit_price:,.1f} (偏移: ${offset_usd:+.1f})")
+    
+    # 下限价单 - 使用新的通用API
+    order_id, result = place_inverse_perp_order_crypto_notional(
+        instId=instId,
+        side=side,
+        crypto_notional=crypto_notional,
+        ordType="limit",
+        px=limit_price,
+        posSide=posSide,
+        tdMode=tdMode,
+        simulated=simulated
+    )
+    
+    if order_id:
+        return {
+            "success": True,
+            "orderId": order_id,
+            "instId": instId,
+            "side": side,
+            "limit_price": limit_price,
+            "reference_price": book["bid"] if side.lower() == "buy" else book["ask"],
+            "offset": offset_usd,
+            "crypto_notional": crypto_notional,
+            "result": result
+        }
+    else:
+        return {
+            "success": False,
+            "orderId": None,
+            "error": result
+        }
+
+def demo_order_management():
+    """演示完整的订单管理流程"""
+    print("🚀 开始订单管理演示...")
+    
+    # 1. 查看当前未成交订单
+    print("\n📊 Step 1: 查看当前未成交订单")
+    orders = get_pending_orders()
+    
+    # 2. 下一个limit订单
+    print("\n🎯 Step 2: 下limit订单")
+    order_info = place_and_track_order(
+        instId="BTC-USD-SWAP",
+        side="buy",
+        btc_notional=0.1,
+        ordType="limit",
+        price_offset=-100  # 低于市价100美元
+    )
+    
+    # 3. 再次查看订单
+    if order_info and order_info["success"]:
+        print("\n📋 Step 3: 查看新订单")
+        import time
+        time.sleep(1)
+        get_pending_orders(instId="BTC-USD-SWAP")
+        
+        # 4. 取消刚下的订单
+        print("\n🚫 Step 4: 取消订单")
+        cancel_order(order_info["orderId"], order_info["instId"])
+        
+        # 5. 验证订单已取消
+        print("\n🔍 Step 5: 验证订单已取消")
+        get_pending_orders(instId="BTC-USD-SWAP")
+    
+    return order_info
+
+# write a function place limit order based on ask-1 and bid-1
+
+def get_trade_fills_history(
+    instId: Optional[str] = None,
+    instType: str = "SWAP",
+    ordId: Optional[str] = None,
+    begin: Optional[str] = None,
+    end: Optional[str] = None,
+    limit: int = 100,
+    simulated: bool = False
+):
+    """
+    获取成交历史记录（过去3个月）
+    
+    OKX API: GET /api/v5/trade/fills-history
+    
+    Args:
+        instId: 合约ID，如"ETH-USD-SWAP"（可选）
+        instType: 产品类型，默认"SWAP"
+        ordId: 订单ID（可选）
+        begin: 开始时间戳（毫秒），如 "1597026383085"（可选）
+        end: 结束时间戳（毫秒），如 "1597026383085"（可选）
+        limit: 返回结果数量，默认100，最大100
+        simulated: 是否使用模拟盘，默认False（实盘）
+    
+    Returns:
+        list: 成交记录列表，每个成交包含：
+            - tradeId: 成交ID
+            - ordId: 订单ID
+            - instId: 合约ID
+            - side: 方向 (buy/sell)
+            - fillSz: 成交数量
+            - fillPx: 成交价格
+            - fillPnl: 该笔成交的已实现盈亏
+            - fee: 手续费
+            - ts: 成交时间戳
+    
+    示例:
+        # 获取 ETH-USD-SWAP 最近的成交
+        fills = get_trade_fills_history(instId="ETH-USD-SWAP")
+        
+        # 获取指定时间范围的成交
+        fills = get_trade_fills_history(
+            instId="ETH-USD-SWAP",
+            begin="1700000000000",  # 2023-11-15
+            end="1700086400000"     # 2023-11-16
+        )
+        
+        # 计算总 Realized P&L
+        total_realized_pnl = sum(float(f.get("fillPnl", 0)) for f in fills)
+    """
+    try:
+        # 构建查询参数
+        params = {
+            "instType": instType,
+            "limit": str(limit)
+        }
+        
+        if instId:
+            params["instId"] = instId
+        if ordId:
+            params["ordId"] = ordId
+        if begin:
+            params["begin"] = begin
+        if end:
+            params["end"] = end
+        
+        # 调用API
+        result = okx_get("/api/v5/trade/fills-history", params=params, simulated=simulated)
+        
+        fills = result.get("data", [])
+        
+        return fills
+        
+    except Exception as e:
+        print(f"❌ 获取成交历史失败: {e}")
+        return []
+
+def calculate_realized_pnl_from_fills(
+    instId: str,
+    begin: Optional[str] = None,
+    end: Optional[str] = None,
+    simulated: bool = False
+) -> float:
+    """
+    从成交历史计算指定合约的 Realized P&L
+    
+    Args:
+        instId: 合约ID，如"ETH-USD-SWAP"
+        begin: 开始时间戳（毫秒）（可选）
+        end: 结束时间戳（毫秒）（可选）
+        simulated: 是否使用模拟盘
+    
+    Returns:
+        float: 总已实现盈亏
+    
+    示例:
+        # 计算 ETH-USD-SWAP 的总 Realized P&L
+        realized_pnl = calculate_realized_pnl_from_fills("ETH-USD-SWAP")
+        print(f"Total Realized P&L: {realized_pnl:+.8f} ETH")
+    """
+    print(f"🔍 计算 {instId} 的 Realized P&L...")
+    
+    total_realized_pnl = 0.0
+    total_fee = 0.0
+    fill_count = 0
+    
+    # 获取成交历史（分页，每次最多100条）
+    limit = 100
+    after = None  # 用于分页
+    
+    while True:
+        params_dict = {
+            "instId": instId,
+            "limit": limit,
+            "simulated": simulated
+        }
+        
+        if begin:
+            params_dict["begin"] = begin
+        if end:
+            params_dict["end"] = end
+        if after:
+            params_dict["after"] = after
+        
+        fills = get_trade_fills_history(**params_dict)
+        
+        if not fills:
+            break
+        
+        for fill in fills:
+            fill_pnl = float(fill.get("fillPnl", 0))
+            fee = float(fill.get("fee", 0))
+            
+            total_realized_pnl += fill_pnl
+            total_fee += fee
+            fill_count += 1
+        
+        # 检查是否还有更多数据
+        if len(fills) < limit:
+            break
+        
+        # 获取最后一条记录的 ID 用于分页
+        after = fills[-1].get("tradeId")
+    
+    print(f"✅ 分析完成:")
+    print(f"   成交笔数: {fill_count}")
+    print(f"   Realized P&L: {total_realized_pnl:+.8f}")
+    print(f"   手续费: {total_fee:+.8f}")
+    print(f"   净盈亏: {(total_realized_pnl + total_fee):+.8f}")
+    
+    return total_realized_pnl
+
+
+if __name__ == "__main__":
+    pass 

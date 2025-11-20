@@ -1,0 +1,521 @@
+import numpy as np
+from typing import List, Dict, Any, Tuple
+from dataclasses import dataclass
+import yaml
+
+# 导入ATM期权筛选器
+from qtrade.optionstrader.arbitrage_searcher.option_data import OptionData
+from qtrade.optionstrader.arbitrage_searcher.calendar_spread.atm_options_okx import get_okx_atm_options
+from qtrade.optionstrader.arbitrage_searcher.option_data import CalendarSpreadOpportunity
+
+
+def update_calendar_spread_opportunity(opportunity: CalendarSpreadOpportunity,
+                                       realized_vol: float,
+                                       net_delta_only: bool = True,
+                                       env: str = "testnet"):
+    """
+    更新Calendar Spread机会的实时Greeks数据
+    
+    Args:
+        opportunity: 现有的CalendarSpreadOpportunity对象
+        realized_vol: 最新的实现波动率
+        net_delta_only: 如果为True，只返回combined net delta；如果为False，返回完整更新的对象
+        env: 交易环境 ("testnet" 或 "mainnet")
+    
+    Returns:
+        如果net_delta_only=True: float (combined net delta)
+        如果net_delta_only=False: CalendarSpreadOpportunity (更新后的完整对象)
+    """
+    try:
+        # 检测symbol格式，判断使用哪个交易所API
+        # OKX格式: ETH-USD-20260130-3400-C (包含"USD")
+        # Deribit格式: ETH-30DEC25-3400-C (不包含"USD")
+        short_symbol = opportunity.short_option.symbol
+        is_okx = "-USD-" in short_symbol
+        
+        assert is_okx, "Only OKX is supported for Calendar Spread"
+        if is_okx:
+            # 使用OKX API
+            from qtrade.order_api.okx.func_call.options_market_data import get_okx_option_market_data
+
+        
+        # 获取最新的期权市场数据
+        def get_latest_option_data(symbol: str) -> Dict[str, Any]:
+            """获取单个期权的最新市场数据"""
+            try:
+                # 使用OKX API
+                data = get_okx_option_market_data(symbol, simulated=(env == "testnet"))
+                if not data:
+                    return None
+                
+                # OKX数据格式
+                return {
+                    "best_bid": data["bid"],
+                    "best_ask": data["ask"],
+                    "mid_price": data["mid_price"],
+                    "mark_price": data["mark_price"],
+                    "mark_iv": data["mark_iv"],
+                    "open_interest": data.get("open_interest", 0),
+                    "greeks": {
+                        "delta": data["greeks"]["delta"],
+                        "net_delta": data["greeks"]["delta"],  # OKX的delta就是net_delta
+                        "gamma": data["greeks"]["gamma"],
+                        "vega": data["greeks"]["vega"],
+                        "theta": data["greeks"]["theta"],
+                        "rho": 0  # OKX不提供rho
+                    }
+                }
+            except Exception as e:
+                print(f"⚠️ 获取{symbol}最新数据失败: {e}")
+                return None
+        
+        # 获取Short和Long期权的最新数据
+        short_data = get_latest_option_data(opportunity.short_option.symbol)
+        long_data = get_latest_option_data(opportunity.long_option.symbol)
+        
+        if not short_data or not long_data:
+            print("❌ 无法获取期权最新数据")
+            if net_delta_only:
+                # 返回原有的net delta (Calendar Spread的净Delta = Long Delta - Short Delta)
+                original_net_delta = opportunity.long_option.net_delta - opportunity.short_option.net_delta
+                return original_net_delta
+            else:
+                return opportunity  # 返回原对象
+        
+        # 如果只需要net delta，直接计算并返回
+        if net_delta_only:
+            short_net_delta = short_data["greeks"]["net_delta"]
+            long_net_delta = long_data["greeks"]["net_delta"]
+            # Calendar Spread Net Delta = 买入期权的Net Delta - 卖出期权的Net Delta
+            # 因为我们买入长期期权(+Delta)，卖出短期期权(-Delta)
+            combined_net_delta = long_net_delta - short_net_delta
+            
+            print(f"🔄 更新Calendar Spread Net Delta (单位Delta):")
+            print(f"   Short (卖出): {short_net_delta:.4f}")
+            print(f"   Long (买入): {long_net_delta:.4f}")
+            print(f"   Combined: {combined_net_delta:.4f}")
+            print(f"   对冲建议: {'做空标的' if combined_net_delta > 0 else '做多标的' if combined_net_delta < 0 else '无需对冲'}")
+            return combined_net_delta
+        
+        # 如果需要完整更新，直接更新原对象的属性
+        # 更新Short Option数据
+        opportunity.short_option.iv = short_data["mark_iv"]
+        opportunity.short_option.bid = short_data["best_bid"]
+        opportunity.short_option.ask = short_data["best_ask"]
+        opportunity.short_option.mid_price = short_data["mid_price"]
+        opportunity.short_option.delta = short_data["greeks"]["delta"]
+        opportunity.short_option.net_delta = short_data["greeks"]["net_delta"]  # 保持交易所原始单位Delta
+        opportunity.short_option.gamma = short_data["greeks"]["gamma"]
+        opportunity.short_option.vega = short_data["greeks"]["vega"]
+        opportunity.short_option.theta = short_data["greeks"]["theta"]
+        opportunity.short_option.rho = short_data["greeks"]["rho"]
+        opportunity.short_option.open_interest = short_data["open_interest"]
+        
+        # 更新Long Option数据
+        opportunity.long_option.iv = long_data["mark_iv"]
+        opportunity.long_option.bid = long_data["best_bid"]
+        opportunity.long_option.ask = long_data["best_ask"]
+        opportunity.long_option.mid_price = long_data["mid_price"]
+        opportunity.long_option.delta = long_data["greeks"]["delta"]
+        opportunity.long_option.net_delta = long_data["greeks"]["net_delta"]  # 保持交易所原始单位Delta
+        opportunity.long_option.gamma = long_data["greeks"]["gamma"]
+        opportunity.long_option.vega = long_data["greeks"]["vega"]
+        opportunity.long_option.theta = long_data["greeks"]["theta"]
+        opportunity.long_option.rho = long_data["greeks"]["rho"]
+        opportunity.long_option.open_interest = long_data["open_interest"]
+        
+        # 重新计算Calendar Spread衍生属性
+        opportunity.iv_spread = opportunity.short_option.iv - opportunity.long_option.iv
+        opportunity.iv_spread_pct = (opportunity.iv_spread / opportunity.long_option.iv) if opportunity.long_option.iv > 0 else 0
+        opportunity.net_premium = opportunity.short_option.mid_price - opportunity.long_option.mid_price  # 卖出收入 - 买入成本
+        opportunity.time_gap_days = opportunity.long_option.days_to_expiry - opportunity.short_option.days_to_expiry
+        
+        # 重新计算最大盈利潜力（简化版）
+        opportunity.max_profit_potential = abs(opportunity.net_premium) * 0.5  # 简化计算
+        
+        # 重新评估信号强度
+        opportunity.signal_strength = _evaluate_signal_strength(
+            opportunity.iv_spread, opportunity.iv_spread_pct, opportunity.time_gap_days
+        )
+        
+        print(f"✅ 完整更新Calendar Spread机会 (in-place):")
+        print(f"   Combined Net Delta: {opportunity.long_option.net_delta - opportunity.short_option.net_delta:.4f}")
+        print(f"   IV Spread: {opportunity.iv_spread:.4f} ({opportunity.iv_spread_pct:+.1%})")
+        print(f"   Net Premium: {opportunity.net_premium:.4f}")
+        print(f"   Signal Strength: {opportunity.signal_strength}")
+        print(f"   对冲建议: {'做空标的' if (opportunity.long_option.net_delta - opportunity.short_option.net_delta) > 0 else '做多标的' if (opportunity.long_option.net_delta - opportunity.short_option.net_delta) < 0 else '无需对冲'}")
+        
+        return opportunity
+        
+    except Exception as e:
+        print(f"❌ 更新Calendar Spread机会失败: {e}")
+        if net_delta_only:
+            # 返回原有的net delta
+            original_net_delta = opportunity.long_option.net_delta - opportunity.short_option.net_delta
+            return original_net_delta
+        else:
+            return opportunity 
+
+
+def find_calendar_spread_options(atm_options: List[OptionData], config: Dict[str, Any]) -> List[CalendarSpreadOpportunity]:
+    """
+    寻找Calendar Spread期权对
+    
+    Args:
+        atm_options: ATM期权列表（从atm_options_filter.py获得）
+        config: 配置字典
+        
+    Returns:
+        Calendar Spread机会列表
+    """
+    print("🔍 搜索Calendar Spread机会...")
+    
+    opportunities = []
+    
+    # 获取配置参数
+    time_pairings = config["time_pairings"]["valid_combinations"]
+    time_tolerance = config["time_pairings"]["time_tolerance_days"]
+    min_iv_spread = config["iv_criteria"]["min_iv_spread"]
+    max_results = config["search_config"]["max_results"]
+    
+    # 按期权类型和执行价分组
+    grouped_options = _group_options_by_strike_and_type(atm_options)
+    
+    print(f"📊 按执行价和类型分组后有{len(grouped_options)}个组")
+    
+    # 对每个时间配对搜索机会
+    for pairing in time_pairings:
+        short_days = pairing["short_days"]
+        long_days = pairing["long_days"]
+        
+        print(f"🔍 搜索时间配对: {short_days}天 vs {long_days}天...")
+        
+        # 在每个分组中寻找匹配的期权对
+        for group_key, options_in_group in grouped_options.items():
+            strike, option_type = group_key
+            
+            # 筛选短期和长期期权
+            short_candidates = [
+                opt for opt in options_in_group 
+                if abs(opt.days_to_expiry - short_days) <= time_tolerance
+            ]
+            
+            long_candidates = [
+                opt for opt in options_in_group 
+                if abs(opt.days_to_expiry - long_days) <= time_tolerance
+            ]
+            
+            # 寻找有效的Calendar Spread配对
+            for short_opt in short_candidates:
+                for long_opt in long_candidates:
+                    if _is_valid_calendar_pair(short_opt, long_opt, min_iv_spread):
+                        opportunity = _create_calendar_opportunity(
+                            short_opt, long_opt, len(opportunities) + 1
+                        )
+                        opportunities.append(opportunity)
+    
+    # 排序和限制结果
+    opportunities = _sort_and_limit_opportunities(opportunities, config)
+    
+    print(f"✅ 找到{len(opportunities)}个Calendar Spread机会")
+    
+    return opportunities
+
+
+def _group_options_by_strike_and_type(atm_options: List[OptionData]) -> Dict[Tuple[float, str], List[OptionData]]:
+    """
+    按执行价和期权类型分组
+    
+    Returns:
+        Dict[Tuple[strike, option_type], List[OptionData]]
+    """
+    grouped = {}
+    
+    for option in atm_options:
+        key = (option.strike, option.option_type)
+        if key not in grouped:
+            grouped[key] = []
+        grouped[key].append(option)
+    
+    return grouped
+
+
+def _is_valid_calendar_pair(short_opt: OptionData, long_opt: OptionData, min_iv_spread: float) -> bool:
+    """
+    检查是否为有效的Calendar Spread配对
+    
+    条件：
+    1. 长期期权到期时间 > 短期期权到期时间
+    2. IV期限结构倒挂：short_iv > long_iv + min_iv_spread
+    3. 两个期权都有有效的市场数据
+    """
+    
+    # 1. 时间结构检查
+    if long_opt.days_to_expiry <= short_opt.days_to_expiry:
+        return False
+    
+    # 2. IV期限结构倒挂检查
+    iv_spread = short_opt.iv - long_opt.iv
+    if iv_spread < min_iv_spread:
+        return False
+    
+    # 3. 市场数据有效性检查
+    if (short_opt.bid <= 0 or short_opt.ask <= 0 or 
+        long_opt.bid <= 0 or long_opt.ask <= 0):
+        return False
+    
+    # 4. 价格合理性检查
+    if short_opt.mid_price <= 0 or long_opt.mid_price <= 0:
+        return False
+    
+    return True
+
+
+def _create_calendar_opportunity(short_opt: OptionData, long_opt: OptionData, rank: int) -> CalendarSpreadOpportunity:
+    """
+    创建Calendar Spread机会对象
+    """
+    
+    # 计算关键指标
+    iv_spread = short_opt.iv - long_opt.iv
+    iv_spread_pct = iv_spread / long_opt.iv if long_opt.iv > 0 else 0
+    time_gap_days = long_opt.days_to_expiry - short_opt.days_to_expiry
+    
+    # 净保险费（买入长期 - 卖出短期）
+    net_premium = long_opt.mid_price - short_opt.mid_price
+    
+    # 简化的最大盈利潜力估算
+    # Calendar Spread的理论最大盈利 ≈ 时间价值差异
+    max_profit_potential = abs(short_opt.theta - long_opt.theta) * time_gap_days / 365 * 30  # 简化估算
+    
+    # 信号强度评估
+    signal_strength = _evaluate_signal_strength(iv_spread, iv_spread_pct, time_gap_days)
+    
+    return CalendarSpreadOpportunity(
+        rank=rank,
+        short_option=short_opt,
+        long_option=long_opt,
+        iv_spread=iv_spread,
+        iv_spread_pct=iv_spread_pct,
+        time_gap_days=time_gap_days,
+        net_premium=net_premium,
+        max_profit_potential=max_profit_potential,
+        signal_strength=signal_strength
+    )
+
+
+def _evaluate_signal_strength(iv_spread: float, iv_spread_pct: float, time_gap_days: int) -> str:
+    """
+    评估Calendar Spread信号强度
+    
+    Args:
+        iv_spread: IV绝对价差
+        iv_spread_pct: IV相对价差
+        time_gap_days: 时间间隔
+        
+    Returns:
+        信号强度：WEAK, MODERATE, STRONG
+    """
+    
+    # 强信号条件
+    if (iv_spread >= 0.05 and iv_spread_pct >= 0.15 and time_gap_days >= 14):
+        return "STRONG"
+    
+    # 中等信号条件
+    elif (iv_spread >= 0.03 and iv_spread_pct >= 0.10 and time_gap_days >= 7):
+        return "MODERATE"
+    
+    # 弱信号
+    else:
+        return "WEAK"
+
+
+def _sort_and_limit_opportunities(opportunities: List[CalendarSpreadOpportunity], config: Dict[str, Any]) -> List[CalendarSpreadOpportunity]:
+    """
+    排序和限制机会数量
+    
+    智能筛选逻辑：
+    1. 获取现货价格
+    2. 对于每个执行价组：
+       - 如果现货价 > 执行价：优先选择 PUT（OTM Put，虚值看跌）
+       - 如果现货价 < 执行价：优先选择 CALL（OTM Call，虚值看涨）
+    3. 在筛选后的机会中按IV价差排序
+    """
+    
+    sort_by = config["search_config"]["sort_by"]
+    sort_order = config["search_config"]["sort_order"]
+    max_results = config["search_config"]["max_results"]
+    
+    if not opportunities:
+        return []
+    
+    # 🆕 获取现货价格
+    import requests
+    currency = _get_currency_from_symbol(opportunities[0].short_option.symbol)
+    
+    try:
+        inst_id = f"{currency}-USD"
+        url = "https://www.okx.com/api/v5/market/index-tickers"
+        params = {"instId": inst_id}
+        
+        resp = requests.get(url, params=params, timeout=5)
+        data = resp.json()
+        
+        if data.get("code") == "0" and data.get("data"):
+            spot_price = float(data["data"][0]["idxPx"])
+        else:
+            print(f"⚠️ 无法获取 {currency} 指数价格，使用第一个期权的执行价作为参考")
+            spot_price = opportunities[0].short_option.strike
+    except Exception as e:
+        print(f"⚠️ 获取指数价格失败: {e}，使用第一个期权的执行价作为参考")
+        spot_price = opportunities[0].short_option.strike
+    
+    print(f"\n📍 当前 {currency} 现货价格: ${spot_price:,.2f}")
+    
+    # 🆕 按执行价分组并智能筛选
+    grouped_by_strike = {}
+    for opp in opportunities:
+        strike = opp.short_option.strike
+        option_type = opp.short_option.option_type
+        
+        if strike not in grouped_by_strike:
+            grouped_by_strike[strike] = {"C": [], "P": []}
+        
+        grouped_by_strike[strike][option_type].append(opp)
+    
+    # 🆕 根据现货价格和执行价关系选择期权类型
+    selected_opportunities = []
+    
+    for strike, options_dict in grouped_by_strike.items():
+        calls = options_dict["C"]
+        puts = options_dict["P"]
+        
+        # 决策逻辑
+        if spot_price > strike:
+            # 现货价 > 执行价：选择 PUT（虚值看跌）
+            if puts:
+                # 在该执行价的所有 PUT 中选择 IV 价差最大的
+                best_put = max(puts, key=lambda x: x.iv_spread)
+                selected_opportunities.append(best_put)
+                print(f"   Strike ${strike:,.0f}: 选择 PUT (现货 ${spot_price:,.0f} > Strike，IV价差 {best_put.iv_spread:+.1%})")
+        else:
+            # 现货价 < 执行价：选择 CALL（虚值看涨）
+            if calls:
+                # 在该执行价的所有 CALL 中选择 IV 价差最大的
+                best_call = max(calls, key=lambda x: x.iv_spread)
+                selected_opportunities.append(best_call)
+                print(f"   Strike ${strike:,.0f}: 选择 CALL (现货 ${spot_price:,.0f} < Strike，IV价差 {best_call.iv_spread:+.1%})")
+    
+    # 🆕 在筛选后的机会中排序
+    if sort_by == "iv_spread":
+        selected_opportunities.sort(key=lambda x: x.iv_spread, reverse=(sort_order == "desc"))
+    elif sort_by == "profit_potential":
+        selected_opportunities.sort(key=lambda x: x.max_profit_potential, reverse=(sort_order == "desc"))
+    else:
+        # 默认按IV价差排序
+        selected_opportunities.sort(key=lambda x: x.iv_spread, reverse=True)
+    
+    # 限制数量并重新排名
+    limited_opportunities = selected_opportunities[:max_results]
+    for i, opp in enumerate(limited_opportunities):
+        opp.rank = i + 1
+    
+    return limited_opportunities
+
+
+def _get_currency_from_symbol(symbol: str) -> str:
+    """
+    从期权symbol中提取币种
+    例如: "ETH-USD-251114-3400-C" -> "ETH"
+          "BTC-USD-251114-50000-P" -> "BTC"
+    """
+    parts = symbol.split("-")
+    if len(parts) >= 1:
+        return parts[0]
+    return "UNKNOWN"
+
+
+def display_calendar_opportunities(opportunities: List[CalendarSpreadOpportunity], 
+                                  log_file: str = None) -> None:
+    """
+    显示Calendar Spread机会
+    
+    Args:
+        opportunities: Calendar Spread机会列表
+        log_file: 可选的日志文件路径，如果提供则同时写入文件
+    """
+    from datetime import datetime
+    
+    # 准备输出内容
+    lines = []
+    
+    if not opportunities:
+        lines.append("❌ 未找到符合条件的Calendar Spread机会")
+    else:
+        lines.append(f"\n✅ 找到 {len(opportunities)} 个Calendar Spread机会:")
+        lines.append("=" * 100)
+        
+        for opp in opportunities:
+            # 从symbol中提取币种
+            currency = _get_currency_from_symbol(opp.short_option.symbol)
+            
+            lines.append(f"\n📊 机会 #{opp.rank} - 信号强度: {opp.signal_strength}")
+            
+            lines.append(f"\n   📉 短期期权 (卖出):")
+            lines.append(f"      {opp.short_option}")
+            
+            lines.append(f"\n   📈 长期期权 (买入):")
+            lines.append(f"      {opp.long_option}")
+            
+            lines.append(f"\n   💰 分析:")
+            lines.append(f"      IV价差: {opp.iv_spread:+.1%} ({opp.iv_spread_pct:+.1%})")
+            lines.append(f"      时间间隔: {opp.time_gap_days}天")
+            lines.append(f"      净保险费: {opp.net_premium:+.4f} {currency} {'(支出)' if opp.net_premium < 0 else '(收入)'}")
+            lines.append(f"      预期盈利潜力: {opp.max_profit_potential:.4f} {currency}")
+            
+            lines.append("-" * 100)
+    
+    # 打印到控制台
+    for line in lines:
+        print(line)
+    
+    # 如果提供了日志文件路径，同时写入文件
+    if log_file:
+        try:
+            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            with open(log_file, 'a', encoding='utf-8') as f:
+                f.write(f"\n{'='*100}\n")
+                f.write(f"📅 时间戳: {timestamp}\n")
+                f.write(f"{'='*100}\n")
+                for line in lines:
+                    f.write(line + "\n")
+                f.write(f"\n{'='*100}\n\n")
+            print(f"\n📝 机会详情已保存到: {log_file}")
+        except Exception as e:
+            print(f"\n⚠️ 保存到文件失败: {e}")
+
+if __name__ == "__main__":
+
+        # 加载配置
+    with open("calendar_spread.yaml", "r", encoding="utf-8") as f:
+        config = yaml.safe_load(f)
+    # 1. 获取ATM期权（来自atm_options_filter.py）
+    atm_options = get_okx_atm_options(config, "ETH")
+
+    for opt in atm_options:
+        print("================================================")
+        print(f"📌 {opt.symbol}")
+        print(f"   执行价: ${opt.strike:,.2f}")
+        print(f"   报价: Bid ${opt.bid:,.4f} / Ask ${opt.ask:,.4f} / Mid ${opt.mid_price:,.4f}")
+        print(f"   波动率(IV): {opt.iv:.2%}")
+        print(f"   持仓量(OI): {opt.open_interest}")
+        print(f"   希腊字母: Δ {opt.delta:+.4f} | Γ {opt.gamma:+.4f} | ν {opt.vega:+.4f} | Θ {opt.theta:+.4f} | ρ {opt.rho:+.4f}")
+        print(f"   到期: {opt.expiry} | 剩余: {opt.days_to_expiry} 天 | 类型: {opt.option_type}")
+        print("================================================")
+        print("\n")
+
+    # 2. 搜索Calendar Spread机会
+    opportunities = find_calendar_spread_options(atm_options, config)
+
+    # 3. 显示结果
+    display_calendar_opportunities(opportunities)
