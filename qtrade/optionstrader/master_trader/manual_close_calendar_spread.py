@@ -10,7 +10,7 @@ import sys
 sys.path.append('/home/ubuntu/options_trading')
 import asyncio
 from qtrade.optionstrader.arbitrage_searcher.option_data import CalendarSpreadOpportunity, OptionData
-from qtrade.optionstrader.master_trader.async_coordinated_order_placer import close_calendar_spread_async
+from qtrade.optionstrader.master_trader.async_calendar_order_placer import close_calendar_spread_async
 from qtrade.order_api.okx.client.options_client import OKXOptionsClient
 
 
@@ -282,8 +282,8 @@ def main():
     # ==================== 配置参数 ====================
     # 🔴 请根据你的实际持仓修改以下参数
     
-    SHORT_SYMBOL = "ETH-USD-251121-3100-C"  # 短期 Call (开仓时卖出的，现在要买回)
-    LONG_SYMBOL = "ETH-USD-251226-3100-C"   # 长期 Call (开仓时买入的，现在要卖出)
+    SHORT_SYMBOL = "ETH-USD-251128-3000-C"  # 短期 Call (开仓时卖出的，现在要买回)
+    LONG_SYMBOL = "ETH-USD-251226-3000-C"   # 长期 Call (开仓时买入的，现在要卖出)
     CRYPTO_NOTIONAL = 1.0  # 持仓数量（ETH）
     SIMULATED = False  
     USE_AGGRESSIVE = False  # True=立即成交, False=挂单等待

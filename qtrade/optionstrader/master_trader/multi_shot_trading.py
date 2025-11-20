@@ -17,7 +17,7 @@ from qtrade.optionstrader.arbitrage_searcher.calendar_spread.calendar_spread_fin
     find_calendar_spread_options
 )
 from qtrade.optionstrader.arbitrage_searcher.option_data import CalendarSpreadOpportunity
-from qtrade.optionstrader.master_trader.async_coordinated_order_placer import place_calendar_spread_async
+from qtrade.optionstrader.master_trader.async_calendar_order_placer import place_calendar_spread_async
 from qtrade.optionstrader.trading_engine.okx_engine.okx_risk_manager import OKXRiskManager
 
 
