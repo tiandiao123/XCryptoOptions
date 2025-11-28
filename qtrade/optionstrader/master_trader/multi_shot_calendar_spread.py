@@ -17,8 +17,8 @@ from qtrade.optionstrader.arbitrage_searcher.calendar_spread.calendar_spread_fin
     find_calendar_spread_options
 )
 from qtrade.optionstrader.arbitrage_searcher.option_data import CalendarSpreadOpportunity
-from qtrade.optionstrader.master_trader.async_calendar_order_placer import place_calendar_spread_async
-from qtrade.optionstrader.trading_engine.okx_engine.okx_risk_manager import OKXRiskManager
+from qtrade.optionstrader.master_trader.async_order.async_calendar_order_placer import place_calendar_spread_async
+from qtrade.optionstrader.risk_manager.okx_risk_manager import OKXRiskManager
 
 
 def get_calendar_spread_opportunity(
@@ -132,6 +132,14 @@ def execute_calendar_spread_trade(
         # 记录开仓IV
         opportunity.short_option_entry_iv = opportunity.short_option.iv
         opportunity.long_option_entry_iv = opportunity.long_option.iv
+        
+        # 🆕 记录开仓价格（从result中获取实际成交价）
+        short_open = result.get("short_open")
+        long_open = result.get("long_open")
+        if short_open and hasattr(short_open, 'avg_px'):
+            opportunity.short_option_entry_price = float(short_open.avg_px)
+        if long_open and hasattr(long_open, 'avg_px'):
+            opportunity.long_option_entry_price = float(long_open.avg_px)
         
         # 加入RiskManager
         add_success = risk_manager.add_position(opportunity)

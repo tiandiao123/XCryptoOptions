@@ -15,7 +15,7 @@ import asyncio
 import time
 from typing import Dict, Any, Optional, Tuple
 
-from qtrade.optionstrader.master_trader.async_calendar_order_placer import (
+from qtrade.optionstrader.master_trader.async_order.async_calendar_order_placer import (
     OKXAsyncAPI,
     OrderSpec,
     ActiveOrder

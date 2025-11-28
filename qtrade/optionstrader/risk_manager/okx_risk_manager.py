@@ -15,7 +15,7 @@ from qtrade.optionstrader.arbitrage_searcher.gamma_scalping.ewma_vol_tracker imp
 from qtrade.optionstrader.arbitrage_searcher.calendar_spread.calendar_spread_finder import CalendarSpreadOpportunity, update_calendar_spread_opportunity
 from qtrade.optionstrader.arbitrage_searcher.gamma_scalping.selling_straddle_finder_okx import StraddleOpportunityOKX
 from qtrade.optionstrader.arbitrage_searcher.gamma_scalping.selling_straddle_finder_okx import update_straddle_opportunity_okx
-from qtrade.optionstrader.trading_engine.containers.thread_safe_map import ThreadSafeMap
+from qtrade.optionstrader.risk_manager.containers.thread_safe_map import ThreadSafeMap
 
 # OKX API clients
 from qtrade.order_api.okx.client.options_client import OKXOptionsClient
@@ -463,7 +463,7 @@ class OKXRiskManager:
             self.logger.info(f"   原因: {close_reason}")
             
             try:
-                from qtrade.optionstrader.master_trader.async_coordinated_order_placer import close_calendar_spread_async
+                from qtrade.optionstrader.master_trader.async_order.async_calendar_order_placer import close_calendar_spread_async
                 
                 # 调用异步平仓函数
                 result = close_calendar_spread_async(
@@ -694,10 +694,15 @@ class OKXRiskManager:
                 short_result = None
                 long_result = None
                 
+                # 🆕 记录是否能获取市场数据
+                short_market_data_available = False
+                long_market_data_available = False
+                
                 # 平仓存在的Short腿
                 if short_exists:
                     short_data = get_okx_option_market_data(position.short_option.symbol, simulated=(env == "testnet"))
                     if short_data:
+                        short_market_data_available = True
                         self.logger.info(f"📊 [OKX] 平仓Calendar Short腿 - 使用限价单")
                         self.logger.info(f"   Short: ask={short_data['ask']:.6f}")
                         
@@ -1222,7 +1227,7 @@ class OKXRiskManager:
                 # 📈 更新永续合约已实现P&L（从交易历史中获取）
                 if self.enable_delta_hedge:
                     try:
-                        from qtrade.optionstrader.trading_engine.okx_engine.perp_pnl_tracker import get_perp_realized_pnl
+                        from qtrade.optionstrader.risk_manager.perp_pnl_tracker import get_perp_realized_pnl
                         
                         # 确定查询起始时间
                         if self.last_perp_fill_time is None:
@@ -1585,6 +1590,7 @@ class OKXRiskManager:
         1. 止损/止盈
         2. IV价差反转（短期IV低于长期IV）
         3. 时间衰减（短期期权接近到期）
+        4. 短期期权价格暴跌（跌去90%+）
         
         Args:
             position: Calendar Spread持仓对象
@@ -1603,7 +1609,36 @@ class OKXRiskManager:
         if current_pnl_ratio >= self.profit_target_ratio:
             return True, f"止盈平仓 (P&L: {current_pnl_ratio:.1%})"
         
-        # 2. IV价差反转检查
+        # 2. 短期期权价格暴跌检查（90%+）
+        try:
+            # 获取持仓信息（复用 get_opened_opportunities_pnl 的逻辑）
+            short_symbol = position.short_option.symbol
+            pos_short = self.options_client.get_position(short_symbol)
+            
+            if pos_short:
+                # 从API获取开仓均价（真实成交价）
+                short_open_price = float(pos_short.get("avgPx", 0.0))
+                
+                # 🆕 实时获取当前市场价格
+                from qtrade.optionstrader.arbitrage_searcher.calendar_spread.atm_options_okx import get_okx_option_market_data
+                short_market_data = get_okx_option_market_data(short_symbol, simulated=(env == "testnet"))
+                
+                if short_market_data:
+                    short_current_price = float(short_market_data.get('mid_price', 0))
+                    
+                    if short_open_price > 0 and short_current_price > 0:
+                        # 计算价格跌幅比例
+                        price_drop_ratio = (short_open_price - short_current_price) / short_open_price
+                        
+                        # 如果短期期权价格跌去90%以上（当前价格 <= 开仓价格的10%）
+                        if price_drop_ratio >= 0.90:
+                            self.logger.warning(f"🚨 [OKX] 短期期权价格暴跌: 开仓价 {short_open_price:.6f} → 当前价 {short_current_price:.6f} (跌幅: {price_drop_ratio:.1%})")
+                            return True, f"短期期权价格暴跌平仓 (跌幅: {price_drop_ratio:.1%}, 无等待theta价值)"
+        
+        except Exception as e:
+            self.logger.warning(f"⚠️ [OKX] 短期期权价格检查失败: {e}")
+        
+        # 3. IV价差反转检查
         try:
             short_iv = position.short_option.iv
             long_iv = position.long_option.iv
@@ -1614,13 +1649,13 @@ class OKXRiskManager:
             # - 只要不显著反转（Short IV < Long IV - 1%），策略就是有效的
             # - 只有当IV价差显著为负时才需要平仓
             
-            if current_iv_spread < -0.01:  # IV价差显著为负（< -1%）
+            if current_iv_spread < -0.02:  # IV价差显著为负（< -1%）
                 return True, f"IV价差显著反转平仓 (Short IV: {short_iv:.2%}, Long IV: {long_iv:.2%}, 价差: {current_iv_spread:.2%})"
         
         except Exception as e:
             self.logger.warning(f"⚠️ [OKX] IV价差检查失败: {e}")
         
-        # 3. 时间衰减检查（短期期权接近到期）
+        # 4. 时间衰减检查（短期期权接近到期）
         try:
             short_days_to_expiry = position.short_option.days_to_expiry
             

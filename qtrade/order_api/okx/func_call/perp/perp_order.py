@@ -250,7 +250,7 @@ def get_current_positions(instType: str = "SWAP", instId: Optional[str] = None, 
         silent: 是否静默模式（不打印详细信息）
     """
     if not silent:
-        print(f"🔍 获取当前仓位信息...")
+    print(f"🔍 获取当前仓位信息...")
     
     try:
         # 构建查询参数
@@ -264,11 +264,11 @@ def get_current_positions(instType: str = "SWAP", instId: Optional[str] = None, 
         
         if not positions:
             if not silent:
-                print("📭 没有找到任何仓位")
+            print("📭 没有找到任何仓位")
             return []
         
         if not silent:
-            print(f"✅ 找到 {len(positions)} 个仓位:")
+        print(f"✅ 找到 {len(positions)} 个仓位:")
         
         active_positions = []
         for pos in positions:
@@ -278,22 +278,22 @@ def get_current_positions(instType: str = "SWAP", instId: Optional[str] = None, 
                 active_positions.append(pos)
                 
                 if not silent:
-                    print(f"\n📊 仓位详情:")
-                    print(f"  🔹 合约: {pos.get('instId')}")
-                    print(f"  📏 仓位大小: {position_size} 张")
-                    print(f"  📈 方向: {'多头' if position_size > 0 else '空头'}")
-                    print(f"  💰 平均开仓价: ${float(pos.get('avgPx', 0)):,.1f}")
-                    print(f"  📊 标记价格: ${float(pos.get('markPx', 0)):,.1f}")
-                    print(f"  💵 未实现盈亏: {float(pos.get('upl', 0)):,.6f} {pos.get('ccy')}")
-                    print(f"  📈 盈亏率: {float(pos.get('uplRatio', 0)):.2%}")
-                    print(f"  🎯 杠杆: {pos.get('lever')}x")
-                    print(f"  📏 Position Size: {float(pos.get('pos', 0))} 张")
+                print(f"\n📊 仓位详情:")
+                print(f"  🔹 合约: {pos.get('instId')}")
+                print(f"  📏 仓位大小: {position_size} 张")
+                print(f"  📈 方向: {'多头' if position_size > 0 else '空头'}")
+                print(f"  💰 平均开仓价: ${float(pos.get('avgPx', 0)):,.1f}")
+                print(f"  📊 标记价格: ${float(pos.get('markPx', 0)):,.1f}")
+                print(f"  💵 未实现盈亏: {float(pos.get('upl', 0)):,.6f} {pos.get('ccy')}")
+                print(f"  📈 盈亏率: {float(pos.get('uplRatio', 0)):.2%}")
+                print(f"  🎯 杠杆: {pos.get('lever')}x")
+                print(f"  📏 Position Size: {float(pos.get('pos', 0))} 张")
         
         return active_positions
         
     except Exception as e:
         if not silent:
-            print(f"❌ 获取仓位时出错: {e}")
+        print(f"❌ 获取仓位时出错: {e}")
         return []
 
 def close_position(instId: str, pos_side: Optional[str] = None):
