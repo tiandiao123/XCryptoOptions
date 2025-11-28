@@ -1,16 +1,21 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-手动构建 Calendar Spread 并平仓工具
+手动构建 Calendar Spread 并开仓/平仓工具
 
-用途：当你有已开仓的期权持仓，想要构建 CalendarSpreadOpportunity 对象并平仓
+用途：
+1. 开仓：构建 CalendarSpreadOpportunity 对象并执行开仓（卖短期 + 买长期）
+2. 平仓：构建 CalendarSpreadOpportunity 对象并执行平仓（买回短期 + 卖出长期）
 """
 
 import sys
 sys.path.append('/home/ubuntu/options_trading')
 import asyncio
 from qtrade.optionstrader.arbitrage_searcher.option_data import CalendarSpreadOpportunity, OptionData
-from qtrade.optionstrader.master_trader.async_calendar_order_placer import close_calendar_spread_async
+from qtrade.optionstrader.master_trader.async_order.async_calendar_order_placer import (
+    place_calendar_spread_async,
+    close_calendar_spread_async
+)
 from qtrade.order_api.okx.client.options_client import OKXOptionsClient
 
 
@@ -160,6 +165,126 @@ def create_calendar_spread_from_symbols(
     return opportunity
 
 
+def open_calendar_spread_position(
+    short_symbol: str,
+    long_symbol: str,
+    crypto_notional: float = 1.0,
+    simulated: bool = False,
+    price_offset_ticks: int = 1
+):
+    """
+    开仓 Calendar Spread 持仓
+    
+    Args:
+        short_symbol: 短期期权 symbol (要卖出的)
+        long_symbol: 长期期权 symbol (要买入的)
+        crypto_notional: 交易数量（币本位）
+        simulated: 是否模拟盘
+        price_offset_ticks: 价格偏移（tick数量），默认1=略优于市价
+    """
+    print(f"\n{'='*70}")
+    print(f"🚀 开始开仓 Calendar Spread")
+    print(f"{'='*70}")
+    
+    # 1. 构建 Calendar Spread 对象
+    opportunity = create_calendar_spread_from_symbols(
+        short_symbol=short_symbol,
+        long_symbol=long_symbol,
+        crypto_notional=crypto_notional,
+        simulated=simulated
+    )
+    
+    # 2. 调用开仓函数（内部已经处理了异步）
+    print(f"\n{'='*70}")
+    print(f"📤 执行异步协同开仓")
+    print(f"{'='*70}")
+    print(f"   模式: 挂单等待（price_offset={price_offset_ticks} ticks）")
+    
+    # place_calendar_spread_async 内部有 asyncio.run()，所以直接调用即可
+    result = place_calendar_spread_async(
+        opportunity=opportunity,
+        crypto_notional=crypto_notional,
+        simulated=simulated,
+        price_offset_ticks=price_offset_ticks
+    )
+    
+    # 3. 显示结果
+    print(f"\n{'='*70}")
+    print(f"📊 开仓结果")
+    print(f"{'='*70}")
+    
+    if result.get("success"):
+        print(f"✅ 开仓成功！")
+        print(f"   总耗时: {result.get('total_time', 0):.2f}秒")
+        
+        short_open = result.get("short_open")
+        long_open = result.get("long_open")
+        
+        if short_open:
+            print(f"\n   📉 Short腿 (卖出):")
+            print(f"      订单ID: {short_open.order_id}")
+            print(f"      成交价: {short_open.avg_px:.4f}")
+            print(f"      成交量: {short_open.filled_sz}")
+            print(f"      状态: {short_open.status}")
+        
+        if long_open:
+            print(f"\n   📈 Long腿 (买入):")
+            print(f"      订单ID: {long_open.order_id}")
+            print(f"      成交价: {long_open.avg_px:.4f}")
+            print(f"      成交量: {long_open.filled_sz}")
+            print(f"      状态: {long_open.status}")
+        
+        # 等待2秒后获取详情
+        print(f"\n⏳ 等待2秒后获取订单详情...")
+        import time
+        time.sleep(2)
+        
+        # 获取订单详情
+        client = OKXOptionsClient(simulated=simulated)
+        
+        total_cost = 0.0
+        total_fee = 0.0
+        
+        if short_open and short_open.order_id:
+            short_details = client.get_order_details(short_open.symbol, short_open.order_id)
+            if short_details:
+                short_avg_px = float(short_details.get('avgPx', 0))
+                short_filled = int(float(short_details.get('accFillSz', 0)))
+                short_fee = float(short_details.get('fee', 0))
+                short_notional = short_avg_px * short_filled * 0.1  # 假设 ETH ctMult=0.1
+                total_cost -= short_notional  # 卖出收入为负成本
+                total_fee += short_fee
+                print(f"\n   💰 Short腿 (卖出):")
+                print(f"      收入: {short_notional:+.8f} 币")
+                print(f"      手续费: {short_fee:+.8f} 币")
+        
+        if long_open and long_open.order_id:
+            long_details = client.get_order_details(long_open.symbol, long_open.order_id)
+            if long_details:
+                long_avg_px = float(long_details.get('avgPx', 0))
+                long_filled = int(float(long_details.get('accFillSz', 0)))
+                long_fee = float(long_details.get('fee', 0))
+                long_notional = long_avg_px * long_filled * 0.1  # 假设 ETH ctMult=0.1
+                total_cost += long_notional  # 买入支出为正成本
+                total_fee += long_fee
+                print(f"\n   💰 Long腿 (买入):")
+                print(f"      支出: {long_notional:+.8f} 币")
+                print(f"      手续费: {long_fee:+.8f} 币")
+        
+        print(f"\n{'='*70}")
+        print(f"💰 总计")
+        print(f"{'='*70}")
+        print(f"   净成本: {total_cost:+.8f} 币")
+        print(f"   总手续费: {total_fee:+.8f} 币")
+        print(f"   总支出: {(total_cost + total_fee):+.8f} 币")
+        
+    else:
+        print(f"❌ 开仓失败")
+        print(f"   错误: {result.get('error', 'Unknown error')}")
+    
+    return result
+
+
 def close_calendar_spread_position(
     short_symbol: str,
     long_symbol: str,
@@ -280,12 +405,20 @@ def main():
     """主函数 - 示例用法"""
     
     # ==================== 配置参数 ====================
-    # 🔴 请根据你的实际持仓修改以下参数
+    # 🔴 请根据你的实际需求修改以下参数
     
-    SHORT_SYMBOL = "ETH-USD-251128-3000-C"  # 短期 Call (开仓时卖出的，现在要买回)
-    LONG_SYMBOL = "ETH-USD-251226-3000-C"   # 长期 Call (开仓时买入的，现在要卖出)
-    CRYPTO_NOTIONAL = 1.0  # 持仓数量（ETH）
+    # 选择操作模式
+    OPERATION_MODE = "CLOSE"  # "OPEN" = 开仓, "CLOSE" = 平仓
+    
+    SHORT_SYMBOL = "ETH-USD-251128-2600-P"  # 短期期权
+    LONG_SYMBOL = "ETH-USD-251226-2600-P"   # 长期期权
+    CRYPTO_NOTIONAL = 1.0  # 交易数量（ETH）
     SIMULATED = False  
+    
+    # 开仓参数
+    PRICE_OFFSET_TICKS = 1  # 价格偏移（tick数），1=略优于市价
+    
+    # 平仓参数
     USE_AGGRESSIVE = False  # True=立即成交, False=挂单等待
     
     # 📝 格式说明：
@@ -296,24 +429,48 @@ def main():
     #   - 3100: 执行价 $3,100
     #   - C: Call 看涨期权 (P 为 Put 看跌期权)
     
-    # ==================== 执行平仓 ====================
+    # 📖 操作说明：
+    # - OPEN (开仓):
+    #   - 卖出 SHORT_SYMBOL (短期期权，收取权利金)
+    #   - 买入 LONG_SYMBOL (长期期权，支付权利金)
+    #   - 净成本 = Long支出 - Short收入
+    # 
+    # - CLOSE (平仓):
+    #   - 买回 SHORT_SYMBOL (短期期权，支付权利金)
+    #   - 卖出 LONG_SYMBOL (长期期权，收取权利金)
+    #   - 净收入 = Long收入 - Short支出
+    
+    # ==================== 执行操作 ====================
     
     print(f"\n{'='*70}")
-    print(f"🎯 手动平仓 Calendar Spread 工具")
+    print(f"🎯 手动 {'开仓' if OPERATION_MODE == 'OPEN' else '平仓'} Calendar Spread 工具")
     print(f"{'='*70}")
     print(f"   环境: {'🧪 模拟盘' if SIMULATED else '🔴 实盘'}")
-    print(f"   模式: {'⚡ 激进（立即成交）' if USE_AGGRESSIVE else '💰 保守（挂单等待）'}")
+    if OPERATION_MODE == "OPEN":
+        print(f"   模式: 💰 挂单等待 (偏移 {PRICE_OFFSET_TICKS} ticks)")
+    else:
+        print(f"   模式: {'⚡ 激进（立即成交）' if USE_AGGRESSIVE else '💰 保守（挂单等待）'}")
     print(f"   数量: {CRYPTO_NOTIONAL} 币")
-    print(f"\n🚀 开始执行平仓操作...")
+    print(f"\n🚀 开始执行{'开仓' if OPERATION_MODE == 'OPEN' else '平仓'}操作...")
     
-    # 执行平仓（内部已经处理了异步）
-    result = close_calendar_spread_position(
-        short_symbol=SHORT_SYMBOL,
-        long_symbol=LONG_SYMBOL,
-        crypto_notional=CRYPTO_NOTIONAL,
-        simulated=SIMULATED,
-        use_aggressive=USE_AGGRESSIVE
-    )
+    if OPERATION_MODE == "OPEN":
+        # 执行开仓
+        result = open_calendar_spread_position(
+            short_symbol=SHORT_SYMBOL,
+            long_symbol=LONG_SYMBOL,
+            crypto_notional=CRYPTO_NOTIONAL,
+            simulated=SIMULATED,
+            price_offset_ticks=PRICE_OFFSET_TICKS
+        )
+    else:
+        # 执行平仓
+        result = close_calendar_spread_position(
+            short_symbol=SHORT_SYMBOL,
+            long_symbol=LONG_SYMBOL,
+            crypto_notional=CRYPTO_NOTIONAL,
+            simulated=SIMULATED,
+            use_aggressive=USE_AGGRESSIVE
+        )
     
     print(f"\n✅ 操作完成！")
 

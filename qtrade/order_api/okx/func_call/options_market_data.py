@@ -5,17 +5,19 @@ OKX Options Market Data Retrieval
 获取期权市场数据（orderbook + Greeks）
 """
 
+import time
 from typing import Dict, Any, Optional
 from qtrade.order_api.okx.client.options_client import OKXOptionsClient
 
 
-def get_okx_option_market_data(inst_id: str, simulated: bool = True) -> Optional[Dict[str, Any]]:
+def get_okx_option_market_data(inst_id: str, simulated: bool = True, max_retries: int = 3) -> Optional[Dict[str, Any]]:
     """
     获取OKX期权的完整市场数据（orderbook + Greeks）
     
     Args:
         inst_id: 期权合约ID (e.g., "ETH-USD-20260130-3400-C")
         simulated: 是否使用模拟盘
+        max_retries: 最大重试次数（默认3次）
     
     Returns:
         {
@@ -33,51 +35,83 @@ def get_okx_option_market_data(inst_id: str, simulated: bool = True) -> Optional
             }
         }
     """
-    try:
-        client = OKXOptionsClient(simulated=simulated)
-        
-        # 1. 获取Orderbook
-        orderbook = client.get_orderbook(inst_id)
-        if not orderbook:
-            print(f"⚠️ 无法获取{inst_id}的orderbook")
-            return None
-        
-        # 2. 获取Option Summary（包含Greeks和IV）
-        option_summary = client.get_option_summary(inst_id)
-        if not option_summary:
-            print(f"⚠️ 无法获取{inst_id}的option summary")
-            return None
-        
-        # 提取Greeks
-        greeks_raw = {
-            "delta": option_summary["delta"],
-            "gamma": option_summary["gamma"],
-            "vega": option_summary["vega"],
-            "theta": option_summary["theta"]
-        }
-        
-        # 提取Mark Price和IV
-        mark_price = option_summary["mark_price"]
-        mark_iv = option_summary["mark_iv"]
-        
-        # 提取Open Interest
-        open_interest = option_summary["open_interest"]
-        
-        return {
-            "bid": orderbook["bid"],
-            "ask": orderbook["ask"],
-            "mid_price": orderbook["mid"],
-            "mark_price": mark_price,
-            "mark_iv": mark_iv,  # 已经是小数形式
-            "open_interest": open_interest,
-            "greeks": greeks_raw
-        }
-        
-    except Exception as e:
-        print(f"❌ 获取{inst_id}市场数据失败: {e}")
-        import traceback
-        traceback.print_exc()
-        return None
+    for attempt in range(max_retries):
+        try:
+            client = OKXOptionsClient(simulated=simulated)
+            
+            # 1. 获取Orderbook（带重试）
+            orderbook = None
+            for retry in range(max_retries):
+                orderbook = client.get_orderbook(inst_id)
+                if orderbook:
+                    break
+                if retry < max_retries - 1:
+                    wait_time = 0.5 * (retry + 1)  # 递增等待: 0.5s, 1s, 1.5s
+                    print(f"⚠️ 获取{inst_id}的orderbook失败，{wait_time}秒后重试... (尝试 {retry + 1}/{max_retries})")
+                    time.sleep(wait_time)
+            
+            if not orderbook:
+                print(f"❌ 重试{max_retries}次后仍无法获取{inst_id}的orderbook")
+                if attempt < max_retries - 1:
+                    continue
+                return None
+            
+            # 2. 获取Option Summary（包含Greeks和IV，带重试）
+            option_summary = None
+            for retry in range(max_retries):
+                option_summary = client.get_option_summary(inst_id)
+                if option_summary:
+                    break
+                if retry < max_retries - 1:
+                    wait_time = 0.5 * (retry + 1)
+                    print(f"⚠️ 获取{inst_id}的option summary失败，{wait_time}秒后重试... (尝试 {retry + 1}/{max_retries})")
+                    time.sleep(wait_time)
+            
+            if not option_summary:
+                print(f"❌ 重试{max_retries}次后仍无法获取{inst_id}的option summary")
+                if attempt < max_retries - 1:
+                    continue
+                return None
+            
+            # 提取Greeks
+            greeks_raw = {
+                "delta": option_summary["delta"],
+                "gamma": option_summary["gamma"],
+                "vega": option_summary["vega"],
+                "theta": option_summary["theta"]
+            }
+            
+            # 提取Mark Price和IV
+            mark_price = option_summary["mark_price"]
+            mark_iv = option_summary["mark_iv"]
+            
+            # 提取Open Interest
+            open_interest = option_summary["open_interest"]
+            
+            return {
+                "bid": orderbook["bid"],
+                "ask": orderbook["ask"],
+                "mid_price": orderbook["mid"],
+                "mark_price": mark_price,
+                "mark_iv": mark_iv,  # 已经是小数形式
+                "open_interest": open_interest,
+                "greeks": greeks_raw
+            }
+            
+        except Exception as e:
+            if attempt < max_retries - 1:
+                wait_time = 1.0 * (attempt + 1)
+                print(f"❌ 获取{inst_id}市场数据失败: {e}")
+                print(f"   {wait_time}秒后重试... (尝试 {attempt + 1}/{max_retries})")
+                time.sleep(wait_time)
+                continue
+            else:
+                print(f"❌ 获取{inst_id}市场数据失败（已重试{max_retries}次）: {e}")
+                import traceback
+                traceback.print_exc()
+                return None
+    
+    return None
 
 
 if __name__ == "__main__":
